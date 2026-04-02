@@ -1,14 +1,20 @@
 'use client';
 
-import { useTheme } from 'next-themes';
+import { ConnectionState } from 'livekit-client';
 import { AnimatePresence, motion } from 'motion/react';
 import { useSessionContext } from '@livekit/components-react';
 import type { AppConfig } from '@/app-config';
-import { AgentSessionView_01 } from '@/components/agents-ui/blocks/agent-session-view-01';
+import { SessionView } from '@/components/app/session-view';
 import { WelcomeView } from '@/components/app/welcome-view';
+import type { VoiceRouteMetadata, VoiceRouteState } from '@/hooks/useVoiceRoute';
+
+// VIVENTIUM START
+// Purpose: Viventium agent-starter customization.
+// Details: docs/requirements_and_learnings/05_Open_Source_Modifications.md#agent-starter-react
+// VIVENTIUM END
 
 const MotionWelcomeView = motion.create(WelcomeView);
-const MotionSessionView = motion.create(AgentSessionView_01);
+const MotionSessionView = motion.create(SessionView);
 
 const VIEW_MOTION_PROPS = {
   variants: {
@@ -30,46 +36,78 @@ const VIEW_MOTION_PROPS = {
 
 interface ViewControllerProps {
   appConfig: AppConfig;
+  canStartCall: boolean;
+  startHint?: string;
+  startButtonText?: string;
+  onStartCall: () => void;
+  wingModeEnabled?: boolean;
+  wingModePending?: boolean;
+  onWingModeChange?: (enabled: boolean) => void;
+  voiceRoute: VoiceRouteMetadata;
+  requestedVoiceRoute: VoiceRouteState;
+  onRequestedVoiceRouteChange: (nextState: VoiceRouteState) => Promise<boolean> | void;
+  voiceRouteLoading?: boolean;
+  voiceRouteSaving?: boolean;
+  voiceRouteError?: string | null;
+  voiceRouteNotice?: string | null;
 }
 
-export function ViewController({ appConfig }: ViewControllerProps) {
-  const { isConnected, start } = useSessionContext();
-  const { resolvedTheme } = useTheme();
+export function ViewController({
+  appConfig,
+  canStartCall,
+  startHint,
+  startButtonText,
+  onStartCall,
+  wingModeEnabled,
+  wingModePending,
+  onWingModeChange,
+  voiceRoute,
+  requestedVoiceRoute,
+  onRequestedVoiceRouteChange,
+  voiceRouteLoading,
+  voiceRouteSaving,
+  voiceRouteError,
+  voiceRouteNotice,
+}: ViewControllerProps) {
+  const { isConnected, connectionState } = useSessionContext();
+  const showSessionView = isConnected || connectionState !== ConnectionState.Disconnected;
 
   return (
     <AnimatePresence mode="wait">
       {/* Welcome view */}
-      {!isConnected && (
+      {!showSessionView && (
         <MotionWelcomeView
           key="welcome"
           {...VIEW_MOTION_PROPS}
-          startButtonText={appConfig.startButtonText}
-          onStartCall={start}
+          startButtonText={
+            startButtonText ?? (canStartCall ? appConfig.startButtonText : 'Open from Viventium')
+          }
+          onStartCall={onStartCall}
+          startDisabled={!canStartCall}
+          helperText={startHint}
+          voiceRoute={voiceRoute}
+          requestedVoiceRoute={requestedVoiceRoute}
+          onRequestedVoiceRouteChange={onRequestedVoiceRouteChange}
+          voiceRouteLoading={voiceRouteLoading}
+          voiceRouteSaving={voiceRouteSaving}
+          voiceRouteError={voiceRouteError}
+          voiceRouteNotice={voiceRouteNotice}
         />
       )}
       {/* Session view */}
-      {isConnected && (
+      {showSessionView && (
         <MotionSessionView
           key="session-view"
           {...VIEW_MOTION_PROPS}
-          supportsChatInput={appConfig.supportsChatInput}
-          supportsVideoInput={appConfig.supportsVideoInput}
-          supportsScreenShare={appConfig.supportsScreenShare}
-          isPreConnectBufferEnabled={appConfig.isPreConnectBufferEnabled}
-          audioVisualizerType={appConfig.audioVisualizerType}
-          audioVisualizerColor={
-            resolvedTheme === 'dark'
-              ? appConfig.audioVisualizerColorDark
-              : appConfig.audioVisualizerColor
-          }
-          audioVisualizerColorShift={appConfig.audioVisualizerColorShift}
-          audioVisualizerBarCount={appConfig.audioVisualizerBarCount}
-          audioVisualizerGridRowCount={appConfig.audioVisualizerGridRowCount}
-          audioVisualizerGridColumnCount={appConfig.audioVisualizerGridColumnCount}
-          audioVisualizerRadialBarCount={appConfig.audioVisualizerRadialBarCount}
-          audioVisualizerRadialRadius={appConfig.audioVisualizerRadialRadius}
-          audioVisualizerWaveLineWidth={appConfig.audioVisualizerWaveLineWidth}
-          className="fixed inset-0"
+          appConfig={appConfig}
+          wingModeEnabled={wingModeEnabled}
+          wingModePending={wingModePending}
+          onWingModeChange={onWingModeChange}
+          requestedVoiceRoute={requestedVoiceRoute}
+          onRequestedVoiceRouteChange={onRequestedVoiceRouteChange}
+          voiceRouteLoading={voiceRouteLoading}
+          voiceRouteSaving={voiceRouteSaving}
+          voiceRouteError={voiceRouteError}
         />
       )}
     </AnimatePresence>

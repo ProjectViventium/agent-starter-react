@@ -1,28 +1,6 @@
-import { ReactNode, useEffect } from 'react';
-import { toast as sonnerToast } from 'sonner';
+import { useEffect } from 'react';
 import { useAgent, useSessionContext } from '@livekit/components-react';
-import { WarningIcon } from '@phosphor-icons/react';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-
-interface ToastProps {
-  title: ReactNode;
-  description: ReactNode;
-}
-
-function toastAlert(toast: ToastProps) {
-  const { title, description } = toast;
-
-  return sonnerToast.custom(
-    (id) => (
-      <Alert onClick={() => sonnerToast.dismiss(id)} className="bg-accent w-full md:w-[364px]">
-        <WarningIcon weight="bold" />
-        <AlertTitle>{title}</AlertTitle>
-        {description && <AlertDescription>{description}</AlertDescription>}
-      </Alert>
-    ),
-    { duration: 10_000 }
-  );
-}
+import { toastAlert } from '@/components/livekit/alert-toast';
 
 export function useAgentErrors() {
   const agent = useAgent();
@@ -45,13 +23,17 @@ export function useAgentErrors() {
             )}
             {reasons.length === 1 && <p className="w-full">{reasons[0]}</p>}
             <p className="w-full">
+              {/* VIVENTIUM START
+               * Purpose: Point user-facing help links to Viventium.AI.
+               * Details: docs/requirements_and_learnings/16_Branding_and_Assets.md#agent-starter-help-links
+               * VIVENTIUM END */}
               <a
                 target="_blank"
                 rel="noopener noreferrer"
-                href="https://docs.livekit.io/agents/start/voice-ai/"
+                href="https://viventium.ai"
                 className="whitespace-nowrap underline"
               >
-                See quickstart guide
+                Visit Viventium.AI
               </a>
               .
             </p>

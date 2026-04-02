@@ -1,7 +1,13 @@
+/* VIVENTIUM START
+ * Purpose: Viventium agent-starter customization.
+ * Details: docs/requirements_and_learnings/05_Open_Source_Modifications.md#agent-starter-react
+ VIVENTIUM END */
+
 export interface AppConfig {
   pageTitle: string;
   pageDescription: string;
   companyName: string;
+  siteUrl: string;
 
   supportsChatInput: boolean;
   supportsVideoInput: boolean;
@@ -14,58 +20,56 @@ export interface AppConfig {
   logoDark?: string;
   accentDark?: string;
 
-  audioVisualizerType?: 'bar' | 'wave' | 'grid' | 'radial' | 'aura';
-  audioVisualizerColor?: `#${string}`;
-  audioVisualizerColorDark?: `#${string}`;
-  audioVisualizerColorShift?: number;
-  audioVisualizerBarCount?: number;
-  audioVisualizerGridRowCount?: number;
-  audioVisualizerGridColumnCount?: number;
-  audioVisualizerRadialBarCount?: number;
-  audioVisualizerRadialRadius?: number;
-  audioVisualizerWaveLineWidth?: number;
-
   // agent dispatch configuration
   agentName?: string;
+
+  voiceSttProvider?: string;
+  voiceTtsProvider?: string;
+  voiceTtsFallbackProvider?: string;
+  voiceFastLlmProvider?: string;
+  voiceFastLlmModel?: string;
+  openaiAuthMode?: string;
+  anthropicAuthMode?: string;
+  localSubscriptionAuth?: boolean;
+  openaiTtsModel?: string;
+  openaiTtsVoice?: string;
+  openaiTtsSpeed?: string;
 
   // LiveKit Cloud Sandbox configuration
   sandboxId?: string;
 }
 
 export const APP_CONFIG_DEFAULTS: AppConfig = {
-  companyName: 'LiveKit',
-  pageTitle: 'LiveKit Voice Agent',
-  pageDescription: 'A voice agent built with LiveKit',
+  companyName: 'Viventium',
+  pageTitle: 'Viventium Voice Assistant',
+  pageDescription: 'A voice assistant powered by Viventium.',
+  siteUrl: process.env.NEXT_PUBLIC_SITE_URL ?? 'https://viventium.ai',
 
   supportsChatInput: true,
   supportsVideoInput: true,
   supportsScreenShare: true,
   isPreConnectBufferEnabled: true,
 
-  logo: '/lk-logo.svg',
-  accent: '#002cf2',
-  logoDark: '/lk-logo-dark.svg',
-  accentDark: '#1fd5f9',
-  startButtonText: 'Start call',
-
-  // optional: audio visualization configuration
-  // audioVisualizerType: 'bar',
-  // audioVisualizerColor: '#002cf2',
-  // audioVisualizerColorDark: '#1fd5f9',
-  // audioVisualizerColorShift: 0.3,
-  // audioVisualizerBarCount: 5,
-  // audioVisualizerType: 'radial',
-  // audioVisualizerRadialBarCount: 24,
-  // audioVisualizerRadialRadius: 100,
-  // audioVisualizerType: 'grid',
-  // audioVisualizerGridRowCount: 25,
-  // audioVisualizerGridColumnCount: 25,
-  // audioVisualizerType: 'wave',
-  // audioVisualizerWaveLineWidth: 3,
-  // audioVisualizerType: 'aura',
+  logo: '/viventium-logo.svg',
+  accent: '#00A67E',
+  logoDark: '/viventium-logo.svg',
+  accentDark: '#00D4A0',
+  startButtonText: 'Start chat',
 
   // agent dispatch configuration
   agentName: process.env.AGENT_NAME ?? undefined,
+  voiceSttProvider: process.env.VIVENTIUM_STT_PROVIDER ?? undefined,
+  voiceTtsProvider: process.env.VIVENTIUM_TTS_PROVIDER ?? undefined,
+  voiceTtsFallbackProvider: process.env.VIVENTIUM_TTS_PROVIDER_FALLBACK ?? undefined,
+  voiceFastLlmProvider: process.env.VIVENTIUM_VOICE_FAST_LLM_PROVIDER ?? undefined,
+  voiceFastLlmModel: process.env.VIVENTIUM_VOICE_FAST_LLM_MODEL ?? undefined,
+  openaiAuthMode: process.env.VIVENTIUM_OPENAI_AUTH_MODE ?? undefined,
+  anthropicAuthMode: process.env.VIVENTIUM_ANTHROPIC_AUTH_MODE ?? undefined,
+  localSubscriptionAuth:
+    /^(1|true|yes)$/i.test(process.env.VIVENTIUM_LOCAL_SUBSCRIPTION_AUTH ?? '') || false,
+  openaiTtsModel: process.env.VIVENTIUM_OPENAI_TTS_MODEL ?? undefined,
+  openaiTtsVoice: process.env.VIVENTIUM_OPENAI_TTS_VOICE ?? undefined,
+  openaiTtsSpeed: process.env.VIVENTIUM_OPENAI_TTS_SPEED ?? undefined,
 
   // LiveKit Cloud Sandbox configuration
   sandboxId: undefined,
