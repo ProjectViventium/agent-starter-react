@@ -26,8 +26,6 @@ export interface AppConfig {
   voiceSttProvider?: string;
   voiceTtsProvider?: string;
   voiceTtsFallbackProvider?: string;
-  voiceFastLlmProvider?: string;
-  voiceFastLlmModel?: string;
   openaiAuthMode?: string;
   anthropicAuthMode?: string;
   localSubscriptionAuth?: boolean;
@@ -61,8 +59,6 @@ export const APP_CONFIG_DEFAULTS: AppConfig = {
   voiceSttProvider: process.env.VIVENTIUM_STT_PROVIDER ?? undefined,
   voiceTtsProvider: process.env.VIVENTIUM_TTS_PROVIDER ?? undefined,
   voiceTtsFallbackProvider: process.env.VIVENTIUM_TTS_PROVIDER_FALLBACK ?? undefined,
-  voiceFastLlmProvider: process.env.VIVENTIUM_VOICE_FAST_LLM_PROVIDER ?? undefined,
-  voiceFastLlmModel: process.env.VIVENTIUM_VOICE_FAST_LLM_MODEL ?? undefined,
   openaiAuthMode: process.env.VIVENTIUM_OPENAI_AUTH_MODE ?? undefined,
   anthropicAuthMode: process.env.VIVENTIUM_ANTHROPIC_AUTH_MODE ?? undefined,
   localSubscriptionAuth:

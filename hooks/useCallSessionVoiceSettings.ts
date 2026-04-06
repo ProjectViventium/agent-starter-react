@@ -14,14 +14,28 @@ type VoiceSettingsResponse = {
   requestedVoiceRoute?: unknown;
   savedVoiceRoute?: unknown;
   selectionVoiceRoute?: unknown;
+  assistantRoute?: unknown;
   message?: string;
   error?: string;
+};
+
+export type AssistantRouteAssignment = {
+  provider: string | null;
+  model: string | null;
+};
+
+export type AssistantRouteInfo = {
+  primary: AssistantRouteAssignment;
+  voiceCallLlm: AssistantRouteAssignment | null;
+  effective: AssistantRouteAssignment;
+  inheritsPrimary: boolean;
 };
 
 export type UseCallSessionVoiceSettingsResult = {
   requestedVoiceRoute: VoiceRouteState;
   savedVoiceRoute: VoiceRouteState;
   selectionVoiceRoute: VoiceRouteMetadata | null;
+  assistantRoute: AssistantRouteInfo | null;
   isLoading: boolean;
   isSaving: boolean;
   error: string | null;
@@ -37,6 +51,51 @@ function getErrorMessage(payload: VoiceSettingsResponse | null | undefined, fall
     return payload.error.trim();
   }
   return fallback;
+}
+
+function normalizeAssistantRouteAssignment(value: unknown): AssistantRouteAssignment | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const assignment = value as Partial<AssistantRouteAssignment>;
+  const provider =
+    typeof assignment.provider === 'string' && assignment.provider.trim()
+      ? assignment.provider.trim()
+      : null;
+  const model =
+    typeof assignment.model === 'string' && assignment.model.trim()
+      ? assignment.model.trim()
+      : null;
+
+  if (!provider || !model) {
+    return null;
+  }
+
+  return { provider, model };
+}
+
+function normalizeAssistantRouteInfo(value: unknown): AssistantRouteInfo | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const route = value as Partial<AssistantRouteInfo>;
+  const primary = normalizeAssistantRouteAssignment(route.primary);
+  const effective = normalizeAssistantRouteAssignment(route.effective);
+  const voiceCallLlm = normalizeAssistantRouteAssignment(route.voiceCallLlm);
+
+  if (!primary || !effective) {
+    return null;
+  }
+
+  return {
+    primary,
+    voiceCallLlm,
+    effective,
+    inheritsPrimary:
+      typeof route.inheritsPrimary === 'boolean' ? route.inheritsPrimary : voiceCallLlm === null,
+  };
 }
 
 async function requestVoiceSettings(
@@ -77,6 +136,7 @@ async function requestVoiceSettings(
     requestedVoiceRoute: normalizeVoiceRouteState(payload.requestedVoiceRoute),
     savedVoiceRoute: normalizeVoiceRouteState(payload.savedVoiceRoute),
     selectionVoiceRoute: payload.selectionVoiceRoute,
+    assistantRoute: normalizeAssistantRouteInfo(payload.assistantRoute),
   };
 }
 
@@ -91,6 +151,7 @@ export function useCallSessionVoiceSettings(
     createEmptyVoiceRouteState()
   );
   const [selectionVoiceRoute, setSelectionVoiceRoute] = useState<VoiceRouteMetadata | null>(null);
+  const [assistantRoute, setAssistantRoute] = useState<AssistantRouteInfo | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -119,6 +180,7 @@ export function useCallSessionVoiceSettings(
       setRequestedVoiceRouteState(createEmptyVoiceRouteState());
       setSavedVoiceRoute(createEmptyVoiceRouteState());
       setSelectionVoiceRoute(null);
+      setAssistantRoute(null);
       setIsLoading(false);
       setIsSaving(false);
       setError(null);
@@ -131,6 +193,7 @@ export function useCallSessionVoiceSettings(
     setIsLoading(true);
     setError(null);
     setNotice(null);
+    setAssistantRoute(null);
     autoCorrectionRef.current = null;
 
     requestVoiceSettings('GET', callSessionId, undefined, controller.signal)
@@ -138,6 +201,7 @@ export function useCallSessionVoiceSettings(
         setRequestedVoiceRouteState(payload.requestedVoiceRoute);
         setSavedVoiceRoute(payload.savedVoiceRoute);
         setSelectionVoiceRoute(normalizeSelectionRoute(payload.selectionVoiceRoute));
+        setAssistantRoute(payload.assistantRoute);
       })
       .catch((nextError) => {
         if (nextError instanceof Error && nextError.name === 'AbortError') {
@@ -189,6 +253,7 @@ export function useCallSessionVoiceSettings(
         setRequestedVoiceRouteState(payload.requestedVoiceRoute);
         setSavedVoiceRoute(payload.savedVoiceRoute);
         setSelectionVoiceRoute(normalizeSelectionRoute(payload.selectionVoiceRoute));
+        setAssistantRoute(payload.assistantRoute);
       })
       .catch((nextError) => {
         setError(
@@ -225,6 +290,7 @@ export function useCallSessionVoiceSettings(
         setRequestedVoiceRouteState(payload.requestedVoiceRoute);
         setSavedVoiceRoute(payload.savedVoiceRoute);
         setSelectionVoiceRoute(normalizeSelectionRoute(payload.selectionVoiceRoute));
+        setAssistantRoute(payload.assistantRoute);
         return true;
       } catch (nextError) {
         setError(nextError instanceof Error ? nextError.message : 'Unable to save voice settings.');
@@ -240,6 +306,7 @@ export function useCallSessionVoiceSettings(
     requestedVoiceRoute,
     savedVoiceRoute,
     selectionVoiceRoute: normalizedSelectionVoiceRoute,
+    assistantRoute,
     isLoading,
     isSaving,
     error,

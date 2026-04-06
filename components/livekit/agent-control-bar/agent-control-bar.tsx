@@ -9,6 +9,7 @@ import { TrackToggle } from '@/components/livekit/agent-control-bar/track-toggle
 import { Button } from '@/components/livekit/button';
 import { Toggle } from '@/components/livekit/toggle';
 import { VoiceRouteControl } from '@/components/livekit/voice-route-control';
+import type { AssistantRouteInfo } from '@/hooks/useCallSessionVoiceSettings';
 import {
   type VoiceRouteMetadata,
   type VoiceRouteState,
@@ -39,6 +40,7 @@ export interface AgentControlBarProps extends UseInputControlsProps {
   wingModeEnabled?: boolean;
   wingModePending?: boolean;
   onWingModeChange?: (enabled: boolean) => void;
+  assistantRoute?: AssistantRouteInfo | null;
   requestedVoiceRoute: VoiceRouteState;
   onRequestedVoiceRouteChange: (nextState: VoiceRouteState) => Promise<boolean> | void;
   voiceRouteEditingDisabled?: boolean;
@@ -108,15 +110,30 @@ function isProviderCoveredBySubscription(
 type WingRouteSummary = {
   label: string;
   description: string;
-  protectedFromDirectApiCosts: boolean;
+  protectedFromDirectApiCosts: boolean | null;
 };
+
+function buildAssistantDisplayLabel(assignment: { provider: string | null; model: string | null }) {
+  return [formatProviderName(assignment.provider), assignment.model].filter(Boolean).join(' • ');
+}
+
+function buildAssistantDescription(assistantRoute: AssistantRouteInfo | null) {
+  if (!assistantRoute) {
+    return 'Loading current agent route...';
+  }
+
+  const effectiveLabel = buildAssistantDisplayLabel(assistantRoute.effective);
+  if (assistantRoute.inheritsPrimary) {
+    return `${effectiveLabel} (agent primary LLM)`;
+  }
+  return `${effectiveLabel} (agent Voice Call LLM)`;
+}
 
 function buildWingRouteSummaries(
   voiceRoute: VoiceRouteMetadata,
+  assistantRoute: AssistantRouteInfo | null,
   appConfig: AppConfig
 ): WingRouteSummary[] {
-  const fastLlmProvider = appConfig.voiceFastLlmProvider ?? '';
-
   return [
     {
       label: 'Listening',
@@ -138,10 +155,10 @@ function buildWingRouteSummaries(
     },
     {
       label: 'Assistant',
-      description: [formatProviderName(fastLlmProvider), appConfig.voiceFastLlmModel]
-        .filter(Boolean)
-        .join(' • '),
-      protectedFromDirectApiCosts: isProviderCoveredBySubscription(fastLlmProvider, appConfig),
+      description: buildAssistantDescription(assistantRoute),
+      protectedFromDirectApiCosts: assistantRoute
+        ? isProviderCoveredBySubscription(assistantRoute.effective.provider ?? '', appConfig)
+        : null,
     },
   ];
 }
@@ -195,12 +212,18 @@ function WingModeDisclaimer({
                   <span
                     className={cn(
                       'rounded-full px-3 py-1 text-[11px] font-semibold tracking-[0.18em] uppercase',
-                      item.protectedFromDirectApiCosts
+                      item.protectedFromDirectApiCosts === true
                         ? 'bg-emerald-400/15 text-emerald-200'
-                        : 'bg-amber-400/15 text-amber-200'
+                        : item.protectedFromDirectApiCosts === false
+                          ? 'bg-amber-400/15 text-amber-200'
+                          : 'bg-slate-400/20 text-slate-100'
                     )}
                   >
-                    {item.protectedFromDirectApiCosts ? 'Covered' : 'Metered'}
+                    {item.protectedFromDirectApiCosts === true
+                      ? 'Covered'
+                      : item.protectedFromDirectApiCosts === false
+                        ? 'Metered'
+                        : 'Agent setting'}
                   </span>
                 </div>
               ))}
@@ -270,6 +293,7 @@ export function AgentControlBar({
   wingModeEnabled = false,
   wingModePending = false,
   onWingModeChange,
+  assistantRoute = null,
   requestedVoiceRoute,
   onRequestedVoiceRouteChange,
   voiceRouteEditingDisabled = false,
@@ -320,11 +344,11 @@ export function AgentControlBar({
   const wingModeTooltip =
     "Wing Mode: You've had a wingman. Now try a Wing AI. Viventium stays quietly aware, ignores background chatter, and only responds when you're clearly talking to it.";
   const wingRouteSummaries = useMemo(
-    () => buildWingRouteSummaries(voiceRoute, appConfig),
-    [appConfig, voiceRoute]
+    () => buildWingRouteSummaries(voiceRoute, assistantRoute, appConfig),
+    [appConfig, assistantRoute, voiceRoute]
   );
   const wingModeHasMeteredPath = useMemo(
-    () => wingRouteSummaries.some((item) => !item.protectedFromDirectApiCosts),
+    () => wingRouteSummaries.some((item) => item.protectedFromDirectApiCosts !== true),
     [wingRouteSummaries]
   );
 

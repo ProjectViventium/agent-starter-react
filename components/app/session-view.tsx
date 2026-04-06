@@ -15,6 +15,7 @@ import {
   AgentControlBar,
   type ControlBarControls,
 } from '@/components/livekit/agent-control-bar/agent-control-bar';
+import type { AssistantRouteInfo } from '@/hooks/useCallSessionVoiceSettings';
 import { useMicrophoneHealth } from '@/hooks/useMicrophoneHealth';
 import type { VoiceRouteState } from '@/hooks/useVoiceRoute';
 import { cn } from '@/lib/utils';
@@ -67,6 +68,7 @@ interface SessionViewProps {
   wingModeEnabled?: boolean;
   wingModePending?: boolean;
   onWingModeChange?: (enabled: boolean) => void;
+  assistantRoute?: AssistantRouteInfo | null;
   requestedVoiceRoute: VoiceRouteState;
   onRequestedVoiceRouteChange: (nextState: VoiceRouteState) => Promise<boolean> | void;
   voiceRouteLoading?: boolean;
@@ -79,6 +81,7 @@ export const SessionView = ({
   wingModeEnabled = false,
   wingModePending = false,
   onWingModeChange,
+  assistantRoute,
   requestedVoiceRoute,
   onRequestedVoiceRouteChange,
   voiceRouteLoading,
@@ -158,6 +161,7 @@ export const SessionView = ({
             wingModeEnabled={wingModeEnabled}
             wingModePending={wingModePending}
             onWingModeChange={onWingModeChange}
+            assistantRoute={assistantRoute}
             requestedVoiceRoute={requestedVoiceRoute}
             onRequestedVoiceRouteChange={onRequestedVoiceRouteChange}
             voiceRouteEditingDisabled
