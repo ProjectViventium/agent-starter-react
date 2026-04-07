@@ -6,6 +6,7 @@ import { useSessionContext } from '@livekit/components-react';
 import type { AppConfig } from '@/app-config';
 import { SessionView } from '@/components/app/session-view';
 import { WelcomeView } from '@/components/app/welcome-view';
+import type { AssistantRouteInfo } from '@/hooks/useCallSessionVoiceSettings';
 import type { VoiceRouteMetadata, VoiceRouteState } from '@/hooks/useVoiceRoute';
 
 // VIVENTIUM START
@@ -43,6 +44,7 @@ interface ViewControllerProps {
   wingModeEnabled?: boolean;
   wingModePending?: boolean;
   onWingModeChange?: (enabled: boolean) => void;
+  assistantRoute?: AssistantRouteInfo | null;
   voiceRoute: VoiceRouteMetadata;
   requestedVoiceRoute: VoiceRouteState;
   onRequestedVoiceRouteChange: (nextState: VoiceRouteState) => Promise<boolean> | void;
@@ -61,6 +63,7 @@ export function ViewController({
   wingModeEnabled,
   wingModePending,
   onWingModeChange,
+  assistantRoute,
   voiceRoute,
   requestedVoiceRoute,
   onRequestedVoiceRouteChange,
@@ -103,6 +106,7 @@ export function ViewController({
           wingModeEnabled={wingModeEnabled}
           wingModePending={wingModePending}
           onWingModeChange={onWingModeChange}
+          assistantRoute={assistantRoute}
           requestedVoiceRoute={requestedVoiceRoute}
           onRequestedVoiceRouteChange={onRequestedVoiceRouteChange}
           voiceRouteLoading={voiceRouteLoading}

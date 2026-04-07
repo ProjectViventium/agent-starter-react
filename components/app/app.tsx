@@ -21,7 +21,10 @@ import { toastAlert } from '@/components/livekit/alert-toast';
 import { Toaster } from '@/components/livekit/toaster';
 import { useAgentErrors } from '@/hooks/useAgentErrors';
 import { useCallSessionState } from '@/hooks/useCallSessionState';
-import { useCallSessionVoiceSettings } from '@/hooks/useCallSessionVoiceSettings';
+import {
+  type AssistantRouteInfo,
+  useCallSessionVoiceSettings,
+} from '@/hooks/useCallSessionVoiceSettings';
 import { useConnectionRecovery } from '@/hooks/useConnectionRecovery';
 import { useDebugMode } from '@/hooks/useDebug';
 import {
@@ -128,9 +131,7 @@ function normalizeStartError(error: unknown): string {
   return 'Unable to start this call right now. Start a fresh call from Viventium or use /call in Telegram.';
 }
 
-function getConnectionDetailsTokenSource(
-  fallbackOptions?: AgentTokenOptions
-): TokenSourceFixed {
+function getConnectionDetailsTokenSource(fallbackOptions?: AgentTokenOptions): TokenSourceFixed {
   return TokenSource.literal(async (options?: AgentTokenOptions): Promise<ConnectionDetails> => {
     const mergedOptions = {
       ...(fallbackOptions ?? {}),
@@ -188,6 +189,7 @@ type AppSessionProps = {
   appConfig: AppConfig;
   voiceRoute: VoiceRouteMetadata;
   requestedVoiceRoute: VoiceRouteState;
+  assistantRoute?: AssistantRouteInfo | null;
   onRequestedVoiceRouteChange: (nextState: VoiceRouteState) => Promise<boolean>;
   voiceRouteLoading?: boolean;
   voiceRouteSaving?: boolean;
@@ -207,6 +209,7 @@ function AppSession({
   appConfig,
   voiceRoute,
   requestedVoiceRoute,
+  assistantRoute,
   onRequestedVoiceRouteChange,
   voiceRouteLoading,
   voiceRouteSaving,
@@ -311,6 +314,7 @@ function AppSession({
           onWingModeChange={(enabled) => {
             void callSessionState.setWingModeEnabled(enabled);
           }}
+          assistantRoute={assistantRoute}
           voiceRoute={voiceRoute}
           requestedVoiceRoute={requestedVoiceRoute}
           onRequestedVoiceRouteChange={onRequestedVoiceRouteChange}
@@ -453,6 +457,7 @@ export function App({ appConfig }: AppProps) {
       appConfig={appConfig}
       voiceRoute={selectionVoiceRoute}
       requestedVoiceRoute={voiceSettings.requestedVoiceRoute}
+      assistantRoute={voiceSettings.assistantRoute}
       onRequestedVoiceRouteChange={voiceSettings.setRequestedVoiceRoute}
       voiceRouteLoading={voiceSettings.isLoading}
       voiceRouteSaving={voiceSettings.isSaving}

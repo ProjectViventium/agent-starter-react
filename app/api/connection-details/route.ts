@@ -12,6 +12,12 @@ const LIVEKIT_URL = process.env.LIVEKIT_URL;
 const NEXT_PUBLIC_LIVEKIT_URL = process.env.NEXT_PUBLIC_LIVEKIT_URL;
 const VIVENTIUM_LIBRECHAT_ORIGIN = process.env.VIVENTIUM_LIBRECHAT_ORIGIN;
 const VIVENTIUM_CALL_SESSION_SECRET = process.env.VIVENTIUM_CALL_SESSION_SECRET;
+/* VIVENTIUM START
+ * Purpose: Preserve localhost playground behavior while still returning the public LiveKit
+ * signal URL for requests that actually came through the public HTTPS playground origin.
+ * VIVENTIUM END */
+const VIVENTIUM_PUBLIC_PLAYGROUND_URL = process.env.VIVENTIUM_PUBLIC_PLAYGROUND_URL;
+const VIVENTIUM_PUBLIC_LIVEKIT_URL = process.env.VIVENTIUM_PUBLIC_LIVEKIT_URL;
 const ALLOW_DIRECT_AGENT_DISPATCH =
   process.env.VIVENTIUM_ALLOW_DIRECT_AGENT_DISPATCH === '1' ||
   process.env.VIVENTIUM_ALLOW_DIRECT_AGENT_DISPATCH === 'true';
@@ -156,6 +162,60 @@ function extractDeepLinkFallbacks(req: Request) {
   }
 }
 
+/* VIVENTIUM START
+ * Purpose: Route localhost callers to local LiveKit while secure public-origin callers receive
+ * the public WSS origin. This prevents public-edge enablement from breaking same-machine QA.
+ * VIVENTIUM END */
+function normalizeOrigin(value: string | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+  try {
+    return new URL(value).origin;
+  } catch {
+    return null;
+  }
+}
+
+function requestOrigin(req: Request): string | null {
+  const originHeader = normalizeOrigin(req.headers.get('origin') ?? undefined);
+  if (originHeader) {
+    return originHeader;
+  }
+
+  const referer = normalizeOrigin(
+    req.headers.get('referer') ?? req.headers.get('referrer') ?? undefined
+  );
+  if (referer) {
+    return referer;
+  }
+
+  const forwardedProto = (req.headers.get('x-forwarded-proto') || '').trim();
+  const forwardedHost = (
+    req.headers.get('x-forwarded-host') ||
+    req.headers.get('host') ||
+    ''
+  ).trim();
+  if (forwardedProto && forwardedHost) {
+    return `${forwardedProto}://${forwardedHost}`;
+  }
+
+  try {
+    return new URL(req.url).origin;
+  } catch {
+    return null;
+  }
+}
+
+function resolveBrowserLiveKitUrl(req: Request): string | undefined {
+  const publicPlaygroundOrigin = normalizeOrigin(VIVENTIUM_PUBLIC_PLAYGROUND_URL);
+  const publicLivekitUrl = VIVENTIUM_PUBLIC_LIVEKIT_URL;
+  if (publicPlaygroundOrigin && publicLivekitUrl && requestOrigin(req) === publicPlaygroundOrigin) {
+    return publicLivekitUrl;
+  }
+  return NEXT_PUBLIC_LIVEKIT_URL ?? LIVEKIT_URL;
+}
+
 function parseCallSessionIdFromAgentMetadata(agentMetadata: string | undefined): string | null {
   if (!agentMetadata || typeof agentMetadata !== 'string') {
     return null;
@@ -241,7 +301,8 @@ async function confirmViventiumDispatch(
 
 export async function POST(req: Request) {
   try {
-    if (!LIVEKIT_URL && !NEXT_PUBLIC_LIVEKIT_URL) {
+    const browserLiveKitUrl = resolveBrowserLiveKitUrl(req);
+    if (!LIVEKIT_URL && !NEXT_PUBLIC_LIVEKIT_URL && !browserLiveKitUrl) {
       throw new Error('LIVEKIT_URL is not defined');
     }
     if (API_KEY === undefined) {
@@ -354,7 +415,7 @@ export async function POST(req: Request) {
 
     const participantToken = await createToken(options);
     const response = {
-      serverUrl: NEXT_PUBLIC_LIVEKIT_URL ?? LIVEKIT_URL,
+      serverUrl: browserLiveKitUrl,
       roomName: options.room_name,
       participantToken,
       participantName: options.participant_name ?? options.participant_identity,
