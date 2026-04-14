@@ -45,6 +45,11 @@ type TokenRequest = {
   // VIVENTIUM END
 };
 
+type CallSessionVoiceSettingsResponse = {
+  requestedVoiceRoute?: unknown;
+  savedVoiceRoute?: unknown;
+};
+
 // don't cache the results
 export const revalidate = 0;
 
@@ -233,6 +238,109 @@ function parseCallSessionIdFromAgentMetadata(agentMetadata: string | undefined):
   }
 }
 
+function parseAgentMetadata(agentMetadata: string | undefined): Record<string, unknown> | null {
+  if (!agentMetadata || typeof agentMetadata !== 'string') {
+    return null;
+  }
+  const trimmed = agentMetadata.trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function hasRequestedVoiceSelection(route: unknown): boolean {
+  if (!route || typeof route !== 'object' || Array.isArray(route)) {
+    return false;
+  }
+  const state = route as {
+    stt?: { provider?: unknown; variant?: unknown };
+    tts?: { provider?: unknown; variant?: unknown };
+  };
+  const selections = [state.stt, state.tts];
+  return selections.some((selection) => {
+    if (!selection || typeof selection !== 'object') {
+      return false;
+    }
+    return (
+      (typeof selection.provider === 'string' && selection.provider.trim().length > 0) ||
+      (typeof selection.variant === 'string' && selection.variant.trim().length > 0)
+    );
+  });
+}
+
+async function fetchCallSessionVoiceSettings(
+  callSessionId: string
+): Promise<CallSessionVoiceSettingsResponse | null> {
+  if (!VIVENTIUM_LIBRECHAT_ORIGIN || !VIVENTIUM_CALL_SESSION_SECRET) {
+    return null;
+  }
+  const url = new URL(
+    `/api/viventium/calls/${encodeURIComponent(callSessionId)}/voice-settings`,
+    VIVENTIUM_LIBRECHAT_ORIGIN
+  );
+  const resp = await fetch(url.toString(), {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-VIVENTIUM-CALL-SECRET': VIVENTIUM_CALL_SESSION_SECRET,
+    },
+    cache: 'no-store',
+  });
+  if (!resp.ok) {
+    return null;
+  }
+  const payload = (await resp.json().catch(() => null)) as CallSessionVoiceSettingsResponse | null;
+  return payload && typeof payload === 'object' ? payload : null;
+}
+
+async function hydrateAgentMetadataWithVoiceSettings(
+  callSessionId: string | null,
+  agentMetadata: string | undefined
+): Promise<string | undefined> {
+  if (!callSessionId) {
+    return agentMetadata;
+  }
+
+  const parsedMetadata = parseAgentMetadata(agentMetadata) ?? { callSessionId };
+  const existingRequestedVoiceRoute = parsedMetadata.requestedVoiceRoute;
+  if (hasRequestedVoiceSelection(existingRequestedVoiceRoute)) {
+    return JSON.stringify(parsedMetadata);
+  }
+
+  try {
+    const voiceSettings = await fetchCallSessionVoiceSettings(callSessionId);
+    const authoritativeRequestedVoiceRoute =
+      voiceSettings?.requestedVoiceRoute ?? voiceSettings?.savedVoiceRoute;
+    if (!hasRequestedVoiceSelection(authoritativeRequestedVoiceRoute)) {
+      return JSON.stringify(parsedMetadata);
+    }
+
+    console.info(
+      'Hydrated Viventium requestedVoiceRoute from authoritative call-session settings',
+      {
+        callSessionId,
+      }
+    );
+    return JSON.stringify({
+      ...parsedMetadata,
+      callSessionId,
+      requestedVoiceRoute: authoritativeRequestedVoiceRoute,
+    });
+  } catch (error) {
+    console.error('Error hydrating Viventium voice route metadata:', error);
+    return JSON.stringify(parsedMetadata);
+  }
+}
+
 function dispatchRequiresCallSession(): boolean {
   return (
     !ALLOW_DIRECT_AGENT_DISPATCH &&
@@ -342,6 +450,14 @@ export async function POST(req: Request) {
         options.participant_metadata = metadata;
         options.participantMetadata = metadata;
       }
+    }
+
+    const hydratedAgentMetadata = await hydrateAgentMetadataWithVoiceSettings(
+      currentCallSessionId,
+      options.agentMetadata
+    );
+    if (hydratedAgentMetadata) {
+      options.agentMetadata = hydratedAgentMetadata;
     }
 
     const agentName = options.agentName;

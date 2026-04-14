@@ -363,8 +363,8 @@ export function App({ appConfig }: AppProps) {
   const tokenSource = useMemo(() => {
     return typeof process.env.NEXT_PUBLIC_CONN_DETAILS_ENDPOINT === 'string'
       ? getSandboxTokenSource(appConfig)
-      : getConnectionDetailsTokenSource(tokenOptions);
-  }, [appConfig, tokenOptions]);
+      : getConnectionDetailsTokenSource(effectiveTokenOptions);
+  }, [appConfig, effectiveTokenOptions]);
 
   useEffect(() => {
     setClientReady(true);
