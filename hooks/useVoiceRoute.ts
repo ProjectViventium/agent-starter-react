@@ -53,6 +53,13 @@ export type VoiceRouteAutoCorrection = {
   requestedVoiceRoute: VoiceRouteState;
 };
 
+const CARTESIA_MEGAN_VOICE_ID = 'e8e5fffb-252c-436d-b842-8879b84445b6';
+const CARTESIA_LYRA_VOICE_ID = '6ccbfb76-1fc6-48f7-b71d-91ac6298247b';
+const CARTESIA_VOICE_VARIANTS: VoiceRouteCapabilityVariant[] = [
+  { id: CARTESIA_MEGAN_VOICE_ID, label: 'Megan' },
+  { id: CARTESIA_LYRA_VOICE_ID, label: 'Lyra' },
+];
+
 export function createEmptyVoiceRouteSelection(): VoiceRouteSelection {
   return {
     provider: null,
@@ -339,11 +346,8 @@ function buildFallbackCapabilities(appConfig: AppConfig): VoiceRouteCapability[]
       isLocal: false,
       available: true,
       unavailableReason: null,
-      variantLabel: 'Model',
-      variants: [
-        { id: 'sonic-3', label: 'sonic-3' },
-        { id: 'sonic-2', label: 'sonic-2' },
-      ],
+      variantLabel: 'Voice',
+      variants: CARTESIA_VOICE_VARIANTS,
     },
     {
       id: 'xai',
@@ -374,7 +378,11 @@ export function buildFallbackVoiceRoute(appConfig: AppConfig): VoiceRouteMetadat
   const sttProvider = normalizeProviderName(appConfig.voiceSttProvider) || 'pywhispercpp';
   const ttsProvider = normalizeProviderName(appConfig.voiceTtsProvider) || 'openai';
   const ttsVariant =
-    ttsProvider === 'openai' ? appConfig.openaiTtsModel || 'gpt-4o-mini-tts' : null;
+    ttsProvider === 'openai'
+      ? appConfig.openaiTtsModel || 'gpt-4o-mini-tts'
+      : ttsProvider === 'cartesia'
+        ? CARTESIA_MEGAN_VOICE_ID
+        : null;
   const fallbackProvider = normalizeProviderName(appConfig.voiceTtsFallbackProvider) || null;
   const capabilities = buildFallbackCapabilities(appConfig);
 

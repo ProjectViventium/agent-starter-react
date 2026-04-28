@@ -60,7 +60,7 @@ export const stripInternalArtifactsForDisplay = (text: string): string => {
 // displayed as raw text in the chat transcript.
 // Keep regex patterns aligned with surfacePrompts.js stripVoiceControlTagsForDisplay()
 // and agents-playground/src/utils/citations.ts.
-// Updated: 2026-02-22 — added bracket nonverbals, break/speed/volume/spell stripping.
+// Updated: 2026-04-28 - bracket stripping is structural, not a hardcoded token list.
 const SPEAK_TAG_REGEX = /<\/?speak[^>]*>/gi;
 const EMOTION_SELF_CLOSING_REGEX = /<emotion\s+value=["']?[^"'>]+["']?\s*\/>/gi;
 // Note: Use [\s\S]*? instead of .*? with /s flag — tsconfig targets ES2017 (no dotAll).
@@ -69,8 +69,76 @@ const BREAK_TAG_REGEX = /<break\s+time=["']?[^"'>]+["']?\s*\/>/gi;
 const SPEED_TAG_REGEX = /<speed\s+ratio=["']?[^"'>]+["']?\s*\/>/gi;
 const VOLUME_TAG_REGEX = /<volume\s+ratio=["']?[^"'>]+["']?\s*\/>/gi;
 const SPELL_TAG_REGEX = /<spell>([\s\S]*?)<\/spell>/gi;
-const BRACKET_NONVERBAL_REGEX =
-  /\[(?:laugh(?:ter)?|giggle|chuckle|soft laugh|gentle laugh|quiet laugh|nervous laugh|awkward laugh|light laugh|sigh|gentle sigh|soft sigh|breath|breath in|breath out|inhale|exhale|gasp|whisper|hmm|hm)\]/gi;
+const STAGE_DIRECTION_MIN_ALPHA = 3;
+const STAGE_DIRECTION_MAX_ALPHA = 24;
+const STAGE_DIRECTION_MAX_WORDS = 3;
+
+const isStageDirectionBoundary = (ch?: string): boolean =>
+  !ch || /\s/.test(ch) || '.,!?;:(){}<>"\''.includes(ch);
+
+const isBracketStageDirection = (content: string): boolean => {
+  const candidate = content.trim();
+  if (!candidate || candidate !== candidate.toLowerCase()) {
+    return false;
+  }
+  if (/\d/.test(candidate)) {
+    return false;
+  }
+  if (!/^[a-z' -]+$/.test(candidate)) {
+    return false;
+  }
+
+  const alphaCount = (candidate.match(/[a-z]/g) || []).length;
+  if (alphaCount < STAGE_DIRECTION_MIN_ALPHA || alphaCount > STAGE_DIRECTION_MAX_ALPHA) {
+    return false;
+  }
+
+  const words = candidate.replace(/-/g, ' ').split(/\s+/).filter(Boolean);
+  if (words.length === 0 || words.length > STAGE_DIRECTION_MAX_WORDS) {
+    return false;
+  }
+  return words.every((word) => /^[a-z']+$/.test(word));
+};
+
+const stripBracketStageDirections = (text: string): string => {
+  if (!text) {
+    return '';
+  }
+
+  let out = '';
+  let index = 0;
+  while (index < text.length) {
+    if (text[index] !== '[') {
+      out += text[index];
+      index += 1;
+      continue;
+    }
+
+    const closing = text.indexOf(']', index + 1);
+    if (closing < 0) {
+      out += text[index];
+      index += 1;
+      continue;
+    }
+
+    const content = text.slice(index + 1, closing);
+    const left = index > 0 ? text[index - 1] : '';
+    const right = closing + 1 < text.length ? text[closing + 1] : '';
+    if (
+      isBracketStageDirection(content) &&
+      isStageDirectionBoundary(left) &&
+      isStageDirectionBoundary(right)
+    ) {
+      index = closing + 1;
+      continue;
+    }
+
+    out += text.slice(index, closing + 1);
+    index = closing + 1;
+  }
+
+  return out;
+};
 
 export const stripVoiceControlTagsForDisplay = (text: string): string => {
   if (!text) {
@@ -83,7 +151,7 @@ export const stripVoiceControlTagsForDisplay = (text: string): string => {
   cleaned = cleaned.replace(SPEED_TAG_REGEX, '');
   cleaned = cleaned.replace(VOLUME_TAG_REGEX, '');
   cleaned = cleaned.replace(SPELL_TAG_REGEX, '$1');
-  cleaned = cleaned.replace(BRACKET_NONVERBAL_REGEX, '');
+  cleaned = stripBracketStageDirections(cleaned);
   cleaned = cleaned.replace(/[ \t]{2,}/g, ' ');
   // Preserve chunk-boundary whitespace for streamed assistant text. Trimming here
   // causes later chunks like " world" to become "world", which re-concatenates

@@ -72,7 +72,11 @@ function buildCapabilityDisplayLabel(
   fallbackInfo: VoiceRouteInfo
 ) {
   const label = capability?.label || fallbackInfo.label;
-  return variant ? `${label} • ${variant}` : label || buildRouteDisplayLabel(fallbackInfo);
+  const variantLabel =
+    variant && capability
+      ? (capability.variants.find((entry) => entry.id === variant)?.label ?? variant)
+      : variant;
+  return variantLabel ? `${label} • ${variantLabel}` : label || buildRouteDisplayLabel(fallbackInfo);
 }
 
 function resolveRequestedInfo(
@@ -87,6 +91,10 @@ function resolveRequestedInfo(
   );
   const variant = getVariantValue(capability, requested.variant ?? fallbackInfo.variant);
   const label = capability?.label || fallbackInfo.label;
+  const variantLabel =
+    variant && capability
+      ? (capability.variants.find((entry) => entry.id === variant)?.label ?? variant)
+      : variant;
 
   return {
     provider: capability?.id ?? requested.provider ?? fallbackInfo.provider,
@@ -94,7 +102,7 @@ function resolveRequestedInfo(
     displayLabel: buildCapabilityDisplayLabel(capability, variant, fallbackInfo),
     isLocal: capability?.isLocal ?? fallbackInfo.isLocal,
     variant,
-    variantLabel: variant,
+    variantLabel,
     variantType: capability?.variantLabel || fallbackInfo.variantType,
   };
 }

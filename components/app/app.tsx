@@ -54,6 +54,8 @@ type AgentTokenOptions = TokenSourceFetchOptions & {
   participantMetadata?: string;
 };
 
+const VIVENTIUM_CALL_AGENT_CONNECT_TIMEOUT_MS = 90_000;
+
 type DeepLinkState = {
   tokenOptions?: AgentTokenOptions;
   autoConnect: boolean;
@@ -218,7 +220,16 @@ function AppSession({
 }: AppSessionProps) {
   const [hasAutoStarted, setHasAutoStarted] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
-  const session = useSession(tokenSource, tokenOptions);
+  const sessionOptions = useMemo(
+    () => ({
+      ...(tokenOptions ?? {}),
+      agentConnectTimeoutMilliseconds: expectedCallSessionId
+        ? VIVENTIUM_CALL_AGENT_CONNECT_TIMEOUT_MS
+        : undefined,
+    }),
+    [expectedCallSessionId, tokenOptions]
+  );
+  const session = useSession(tokenSource, sessionOptions);
   const callSessionState = useCallSessionState(
     expectedCallSessionId,
     Boolean(expectedCallSessionId) &&
