@@ -123,10 +123,13 @@ function buildAssistantDescription(assistantRoute: AssistantRouteInfo | null) {
   }
 
   const effectiveLabel = buildAssistantDisplayLabel(assistantRoute.effective);
+  const fallbackLabel = assistantRoute.fallbackLlm
+    ? `; fallback ${buildAssistantDisplayLabel(assistantRoute.fallbackLlm)}`
+    : '';
   if (assistantRoute.inheritsPrimary) {
-    return `${effectiveLabel} (agent primary LLM)`;
+    return `${effectiveLabel} (agent primary LLM${fallbackLabel})`;
   }
-  return `${effectiveLabel} (agent Voice Call LLM)`;
+  return `${effectiveLabel} (agent Voice Call LLM${fallbackLabel})`;
 }
 
 function buildWingRouteSummaries(

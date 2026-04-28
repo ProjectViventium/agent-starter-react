@@ -27,6 +27,8 @@ export type AssistantRouteAssignment = {
 export type AssistantRouteInfo = {
   primary: AssistantRouteAssignment;
   voiceCallLlm: AssistantRouteAssignment | null;
+  fallbackLlm: AssistantRouteAssignment | null;
+  voiceFallbackLlm?: AssistantRouteAssignment | null;
   effective: AssistantRouteAssignment;
   inheritsPrimary: boolean;
 };
@@ -84,6 +86,8 @@ function normalizeAssistantRouteInfo(value: unknown): AssistantRouteInfo | null 
   const primary = normalizeAssistantRouteAssignment(route.primary);
   const effective = normalizeAssistantRouteAssignment(route.effective);
   const voiceCallLlm = normalizeAssistantRouteAssignment(route.voiceCallLlm);
+  const fallbackLlm = normalizeAssistantRouteAssignment(route.fallbackLlm);
+  const voiceFallbackLlm = normalizeAssistantRouteAssignment(route.voiceFallbackLlm);
 
   if (!primary || !effective) {
     return null;
@@ -92,6 +96,8 @@ function normalizeAssistantRouteInfo(value: unknown): AssistantRouteInfo | null 
   return {
     primary,
     voiceCallLlm,
+    fallbackLlm,
+    voiceFallbackLlm,
     effective,
     inheritsPrimary:
       typeof route.inheritsPrimary === 'boolean' ? route.inheritsPrimary : voiceCallLlm === null,
