@@ -352,7 +352,8 @@ function dispatchRequiresCallSession(): boolean {
 async function claimViventiumDispatch(
   callSessionId: string,
   roomName: string,
-  agentName: string
+  agentName: string,
+  options?: { reclaimConfirmed?: boolean }
 ): Promise<{ status?: string; claimId?: string | null } | null> {
   if (!VIVENTIUM_LIBRECHAT_ORIGIN || !VIVENTIUM_CALL_SESSION_SECRET) {
     return null;
@@ -367,7 +368,11 @@ async function claimViventiumDispatch(
       'Content-Type': 'application/json',
       'X-VIVENTIUM-CALL-SECRET': VIVENTIUM_CALL_SESSION_SECRET,
     },
-    body: JSON.stringify({ roomName, agentName }),
+    body: JSON.stringify({
+      roomName,
+      agentName,
+      reclaimConfirmed: options?.reclaimConfirmed === true,
+    }),
     cache: 'no-store',
   });
   if (!resp.ok) {
@@ -488,14 +493,29 @@ export async function POST(req: Request) {
 
       let dispatchClaimId: string | null = null;
       let shouldCreateDispatch = true;
+      let shouldReclaimConfirmedDispatch = false;
       if (callSessionId) {
         try {
           const claim = await claimViventiumDispatch(callSessionId, options.room_name, agentName);
           const claimStatus = claim?.status ?? '';
-          if (claimStatus === 'already' || claimStatus === 'in_flight') {
+          if (claimStatus === 'in_flight') {
             shouldCreateDispatch = false;
+          } else if (claimStatus === 'already') {
+            /* VIVENTIUM START
+             * Purpose: A persisted dispatch confirmation can outlive LiveKit's in-memory dispatch
+             * after a local runtime restart. Still verify/recreate the LiveKit dispatch below.
+             * VIVENTIUM END */
+            shouldCreateDispatch = true;
+            shouldReclaimConfirmedDispatch = true;
           } else if (claimStatus === 'claimed') {
             dispatchClaimId = typeof claim?.claimId === 'string' ? claim.claimId : null;
+          } else if (claimStatus === 'expired') {
+            return NextResponse.json(
+              {
+                message: 'This voice call session expired. Start a fresh call from Viventium.',
+              },
+              { status: 410 }
+            );
           }
         } catch (error) {
           console.error('Error claiming Viventium dispatch lease:', error);
@@ -506,9 +526,25 @@ export async function POST(req: Request) {
       try {
         const dispatch = new AgentDispatchClient(host, API_KEY, API_SECRET);
         if (shouldCreateDispatch) {
-          const existing = await dispatch.listDispatch(options.room_name).catch(() => []);
+          const existing = await dispatch.listDispatch(options.room_name);
           const already = existing.some((entry) => entry.agentName === agentName);
           if (!already) {
+            if (callSessionId && shouldReclaimConfirmedDispatch) {
+              const reclaim = await claimViventiumDispatch(
+                callSessionId,
+                options.room_name,
+                agentName,
+                { reclaimConfirmed: true }
+              );
+              const reclaimStatus = reclaim?.status ?? '';
+              if (reclaimStatus === 'claimed') {
+                dispatchClaimId = typeof reclaim?.claimId === 'string' ? reclaim.claimId : null;
+              } else {
+                shouldCreateDispatch = false;
+              }
+            }
+          }
+          if (shouldCreateDispatch && !already) {
             await dispatch.createDispatch(options.room_name, agentName, {
               metadata:
                 typeof agentMetadata === 'string' && agentMetadata.length > 0

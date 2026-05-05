@@ -2,11 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
-import {
-  useRemoteParticipants,
-  useSessionContext,
-  useSessionMessages,
-} from '@livekit/components-react';
+import { useRemoteParticipants, useSessionContext } from '@livekit/components-react';
 import type { AppConfig } from '@/app-config';
 import { ChatTranscript } from '@/components/app/chat-transcript';
 import { PreConnectMessage } from '@/components/app/preconnect-message';
@@ -17,6 +13,7 @@ import {
 } from '@/components/livekit/agent-control-bar/agent-control-bar';
 import type { AssistantRouteInfo } from '@/hooks/useCallSessionVoiceSettings';
 import { useMicrophoneHealth } from '@/hooks/useMicrophoneHealth';
+import { useViventiumSessionMessages } from '@/hooks/useViventiumSessionMessages';
 import type { VoiceRouteState } from '@/hooks/useVoiceRoute';
 import { cn } from '@/lib/utils';
 import { ScrollArea } from '../livekit/scroll-area/scroll-area';
@@ -90,7 +87,7 @@ export const SessionView = ({
   ...props
 }: React.ComponentProps<'section'> & SessionViewProps) => {
   const session = useSessionContext();
-  const { messages } = useSessionMessages(session);
+  const { messages } = useViventiumSessionMessages(session);
   const participants = useRemoteParticipants();
   const [chatOpen, setChatOpen] = useState(false);
   const scrollAreaRef = useRef<HTMLDivElement>(null);

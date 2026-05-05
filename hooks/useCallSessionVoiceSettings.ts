@@ -6,8 +6,8 @@ import {
   type VoiceRouteState,
   autoCorrectRequestedVoiceRoute,
   createEmptyVoiceRouteState,
-  normalizeVoiceRouteState,
   normalizeVoiceRouteMetadata,
+  normalizeVoiceRouteState,
 } from '@/hooks/useVoiceRoute';
 
 type VoiceSettingsResponse = {
@@ -18,6 +18,9 @@ type VoiceSettingsResponse = {
   message?: string;
   error?: string;
 };
+
+const INITIAL_LOAD_RETRY_MS = 1500;
+const INITIAL_LOAD_MAX_ATTEMPTS = 2;
 
 export type AssistantRouteAssignment = {
   provider: string | null;
@@ -53,6 +56,32 @@ function getErrorMessage(payload: VoiceSettingsResponse | null | undefined, fall
     return payload.error.trim();
   }
   return fallback;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+function isLikelyFetchNetworkError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const message = error.message.trim().toLowerCase();
+  return (
+    message === 'failed to fetch' ||
+    message === 'fetch failed' ||
+    message === 'load failed' ||
+    message.includes('networkerror')
+  );
+}
+
+function formatVoiceSettingsError(error: unknown, fallback: string, retrying = false): string {
+  if (isLikelyFetchNetworkError(error)) {
+    return retrying
+      ? 'Viventium is reconnecting to the voice runtime. Retrying voice settings...'
+      : 'Viventium could not reach the voice runtime for voice settings. Check the connection and retry.';
+  }
+  return error instanceof Error && error.message.trim() ? error.message.trim() : fallback;
 }
 
 function normalizeAssistantRouteAssignment(value: unknown): AssistantRouteAssignment | null {
@@ -196,33 +225,52 @@ export function useCallSessionVoiceSettings(
     }
 
     const controller = new AbortController();
+    let retryTimeoutId: ReturnType<typeof setTimeout> | null = null;
     setIsLoading(true);
     setError(null);
     setNotice(null);
     setAssistantRoute(null);
     autoCorrectionRef.current = null;
 
-    requestVoiceSettings('GET', callSessionId, undefined, controller.signal)
-      .then((payload) => {
-        setRequestedVoiceRouteState(payload.requestedVoiceRoute);
-        setSavedVoiceRoute(payload.savedVoiceRoute);
-        setSelectionVoiceRoute(normalizeSelectionRoute(payload.selectionVoiceRoute));
-        setAssistantRoute(payload.assistantRoute);
-      })
-      .catch((nextError) => {
-        if (nextError instanceof Error && nextError.name === 'AbortError') {
-          return;
-        }
-        setError(nextError instanceof Error ? nextError.message : 'Unable to load voice settings.');
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) {
-          setIsLoading(false);
-        }
-      });
+    const loadVoiceSettings = (attempt: number) => {
+      requestVoiceSettings('GET', callSessionId, undefined, controller.signal)
+        .then((payload) => {
+          setRequestedVoiceRouteState(payload.requestedVoiceRoute);
+          setSavedVoiceRoute(payload.savedVoiceRoute);
+          setSelectionVoiceRoute(normalizeSelectionRoute(payload.selectionVoiceRoute));
+          setAssistantRoute(payload.assistantRoute);
+          setError(null);
+        })
+        .catch((nextError) => {
+          if (isAbortError(nextError)) {
+            return;
+          }
+          const shouldRetry =
+            isLikelyFetchNetworkError(nextError) && attempt + 1 < INITIAL_LOAD_MAX_ATTEMPTS;
+          setError(
+            formatVoiceSettingsError(nextError, 'Unable to load voice settings.', shouldRetry)
+          );
+          if (shouldRetry) {
+            retryTimeoutId = setTimeout(() => {
+              retryTimeoutId = null;
+              loadVoiceSettings(attempt + 1);
+            }, INITIAL_LOAD_RETRY_MS);
+          }
+        })
+        .finally(() => {
+          if (!controller.signal.aborted && retryTimeoutId === null) {
+            setIsLoading(false);
+          }
+        });
+    };
+
+    loadVoiceSettings(0);
 
     return () => {
       controller.abort();
+      if (retryTimeoutId !== null) {
+        clearTimeout(retryTimeoutId);
+      }
     };
   }, [callSessionId, normalizeSelectionRoute]);
 
@@ -262,9 +310,7 @@ export function useCallSessionVoiceSettings(
         setAssistantRoute(payload.assistantRoute);
       })
       .catch((nextError) => {
-        setError(
-          nextError instanceof Error ? nextError.message : 'Unable to save voice settings.'
-        );
+        setError(formatVoiceSettingsError(nextError, 'Unable to save voice settings.'));
       })
       .finally(() => {
         setIsSaving(false);
@@ -299,7 +345,7 @@ export function useCallSessionVoiceSettings(
         setAssistantRoute(payload.assistantRoute);
         return true;
       } catch (nextError) {
-        setError(nextError instanceof Error ? nextError.message : 'Unable to save voice settings.');
+        setError(formatVoiceSettingsError(nextError, 'Unable to save voice settings.'));
         return false;
       } finally {
         setIsSaving(false);

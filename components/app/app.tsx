@@ -55,6 +55,8 @@ type AgentTokenOptions = TokenSourceFetchOptions & {
 };
 
 const VIVENTIUM_CALL_AGENT_CONNECT_TIMEOUT_MS = 90_000;
+const CONNECTION_DETAILS_RETRY_MS = 1500;
+const CONNECTION_DETAILS_MAX_ATTEMPTS = 2;
 
 type DeepLinkState = {
   tokenOptions?: AgentTokenOptions;
@@ -123,7 +125,23 @@ function buildCallSessionMetadata(callSessionId: string, requestedVoiceRoute: Vo
   });
 }
 
+function isLikelyFetchNetworkError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const message = error.message.trim().toLowerCase();
+  return (
+    message === 'failed to fetch' ||
+    message === 'fetch failed' ||
+    message === 'load failed' ||
+    message.includes('networkerror')
+  );
+}
+
 function normalizeStartError(error: unknown): string {
+  if (isLikelyFetchNetworkError(error)) {
+    return 'Viventium could not reach the voice runtime. Check the connection and retry.';
+  }
   if (error instanceof Error) {
     const message = error.message.trim();
     if (message) {
@@ -133,6 +151,10 @@ function normalizeStartError(error: unknown): string {
   return 'Unable to start this call right now. Start a fresh call from Viventium or use /call in Telegram.';
 }
 
+async function wait(ms: number): Promise<void> {
+  await new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 function getConnectionDetailsTokenSource(fallbackOptions?: AgentTokenOptions): TokenSourceFixed {
   return TokenSource.literal(async (options?: AgentTokenOptions): Promise<ConnectionDetails> => {
     const mergedOptions = {
@@ -140,17 +162,25 @@ function getConnectionDetailsTokenSource(fallbackOptions?: AgentTokenOptions): T
       ...(options ?? {}),
     };
     let response: Response;
-    try {
-      response = await fetch('/api/connection-details', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(mergedOptions),
-        cache: 'no-store',
-      });
-    } catch (error) {
-      throw new Error(normalizeStartError(error));
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        response = await fetch('/api/connection-details', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(mergedOptions),
+          cache: 'no-store',
+        });
+        break;
+      } catch (error) {
+        const shouldRetry =
+          isLikelyFetchNetworkError(error) && attempt + 1 < CONNECTION_DETAILS_MAX_ATTEMPTS;
+        if (!shouldRetry) {
+          throw new Error(normalizeStartError(error));
+        }
+        await wait(CONNECTION_DETAILS_RETRY_MS);
+      }
     }
 
     let payload: unknown = null;
@@ -244,6 +274,40 @@ function AppSession({
   useWakeLock(session.isConnected);
 
   /* === VIVENTIUM START ===
+   * Feature: Explicit-dispatch call startup hardening.
+   * Purpose: Avoid LiveKit's 15s pre-connect mic publish timeout while /api/connection-details
+   * performs dispatch work. Publisher-dispatch agents still join as soon as the connected room
+   * publishes the microphone track.
+   * === VIVENTIUM END === */
+  const shouldDeferMicrophoneUntilConnected = Boolean(expectedCallSessionId || appConfig.agentName);
+  const startSession = useCallback(async () => {
+    if (!shouldDeferMicrophoneUntilConnected) {
+      await session.start();
+      return;
+    }
+
+    await session.start({
+      tracks: {
+        microphone: {
+          enabled: false,
+        },
+      },
+    });
+
+    try {
+      await session.room.localParticipant.setMicrophoneEnabled(true);
+    } catch (error) {
+      await session.end().catch((disconnectError) => {
+        console.warn(
+          '[Viventium] Failed to disconnect after microphone startup error:',
+          disconnectError
+        );
+      });
+      throw error;
+    }
+  }, [session, shouldDeferMicrophoneUntilConnected]);
+
+  /* === VIVENTIUM START ===
    * Feature: Auto-reconnect after screen sleep / background return.
    * Purpose: If the wake lock fails (e.g., user manually locks phone), attempt
    * to restore the call when the page becomes visible again.
@@ -251,13 +315,13 @@ function AppSession({
   useConnectionRecovery({
     connectionState: session.connectionState,
     isConnected: session.isConnected,
-    start: session.start,
+    start: startSession,
   });
 
   const startCall = useCallback(async () => {
     setStartError(null);
     try {
-      await session.start();
+      await startSession();
       return true;
     } catch (error) {
       const message = normalizeStartError(error);
@@ -269,7 +333,7 @@ function AppSession({
       });
       return false;
     }
-  }, [session]);
+  }, [startSession]);
 
   /* === VIVENTIUM START ===
    * Feature: LibreChat deep-link auto-connect

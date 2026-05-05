@@ -9,16 +9,12 @@
 //   now disconnected, it attempts to restart the session.
 // - Uses a short delay to allow LiveKit's built-in reconnection to attempt first.
 // - Only attempts recovery once per visibility change cycle to prevent loops.
+// - Does not recover after an intentional visible-page disconnect, such as End Call.
 // VIVENTIUM END
-
 import { useCallback, useEffect, useRef } from 'react';
 import { ConnectionState } from 'livekit-client';
 
-/** How long to wait (ms) after page becomes visible before checking connection state.
- * This gives LiveKit's built-in reconnection a chance to recover first. */
-const RECOVERY_DELAY_MS = 2000;
-
-/** Maximum time (ms) to wait for built-in reconnection before attempting fresh start. */
+/** How long (ms) to let LiveKit's built-in reconnection recover after a hidden page returns. */
 const RECONNECT_GRACE_MS = 5000;
 
 interface UseConnectionRecoveryOptions {
@@ -28,6 +24,14 @@ interface UseConnectionRecoveryOptions {
   isConnected: boolean;
   /** Function to start a new session */
   start: () => Promise<void>;
+}
+
+function isRecoverableActiveState(connectionState: ConnectionState): boolean {
+  return (
+    connectionState === ConnectionState.Connecting ||
+    connectionState === ConnectionState.Reconnecting ||
+    connectionState === ConnectionState.SignalReconnecting
+  );
 }
 
 /**
@@ -41,40 +45,100 @@ export function useConnectionRecovery({
 }: UseConnectionRecoveryOptions): void {
   // Track whether the session was active before the page went to background.
   const wasConnectedRef = useRef(false);
+  const shouldRecoverOnVisibleRef = useRef(false);
   const recoveryAttemptedRef = useRef(false);
   const recoveryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isConnectedRef = useRef(isConnected);
+  const connectionStateRef = useRef(connectionState);
 
-  // Keep track of connected state continuously
+  // Keep track of connected state continuously.
   useEffect(() => {
+    isConnectedRef.current = isConnected;
+    connectionStateRef.current = connectionState;
     if (isConnected) {
       wasConnectedRef.current = true;
       recoveryAttemptedRef.current = false;
-    } else if (connectionState === ConnectionState.Disconnected) {
-      // Don't reset wasConnected here - we need to know it was connected before
+      return;
+    }
+
+    if (
+      connectionState === ConnectionState.Disconnected &&
+      typeof document !== 'undefined' &&
+      document.visibilityState === 'visible'
+    ) {
+      if (wasConnectedRef.current && shouldRecoverOnVisibleRef.current) {
+        return;
+      }
+      // A visible-page disconnect is intentional user action in this UI, such as End Call.
+      wasConnectedRef.current = false;
+      shouldRecoverOnVisibleRef.current = false;
+      recoveryAttemptedRef.current = false;
     }
   }, [isConnected, connectionState]);
 
   const attemptRecovery = useCallback(async () => {
     // Only attempt if we were previously connected, are now disconnected,
     // and haven't already tried recovery for this visibility cycle.
-    if (!wasConnectedRef.current || recoveryAttemptedRef.current) {
+    if (
+      !wasConnectedRef.current ||
+      !shouldRecoverOnVisibleRef.current ||
+      recoveryAttemptedRef.current ||
+      connectionStateRef.current !== ConnectionState.Disconnected ||
+      isConnectedRef.current
+    ) {
       return;
     }
 
     recoveryAttemptedRef.current = true;
+    shouldRecoverOnVisibleRef.current = false;
 
     try {
       await start();
     } catch (error) {
       console.warn('[Viventium] Connection recovery failed:', error);
-      // Reset so we can try again on next visibility change
+      // Leave the call stopped after a failed recovery; the user can start again manually.
+      wasConnectedRef.current = false;
       recoveryAttemptedRef.current = false;
+      shouldRecoverOnVisibleRef.current = false;
     }
   }, [start]);
+
+  const scheduleRecoveryCheck = useCallback(() => {
+    if (recoveryTimerRef.current) {
+      return;
+    }
+    recoveryTimerRef.current = setTimeout(() => {
+      recoveryTimerRef.current = null;
+      void attemptRecovery();
+    }, RECONNECT_GRACE_MS);
+  }, [attemptRecovery]);
+
+  useEffect(() => {
+    if (
+      connectionState !== ConnectionState.Disconnected ||
+      typeof document === 'undefined' ||
+      document.visibilityState !== 'visible' ||
+      !wasConnectedRef.current ||
+      !shouldRecoverOnVisibleRef.current ||
+      isConnectedRef.current
+    ) {
+      return;
+    }
+
+    scheduleRecoveryCheck();
+  }, [connectionState, scheduleRecoveryCheck]);
 
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.visibilityState !== 'visible') {
+        if (isConnectedRef.current || isRecoverableActiveState(connectionStateRef.current)) {
+          wasConnectedRef.current = true;
+          shouldRecoverOnVisibleRef.current = true;
+          recoveryAttemptedRef.current = false;
+        } else {
+          wasConnectedRef.current = false;
+          shouldRecoverOnVisibleRef.current = false;
+        }
         // Page going to background - clear any pending recovery
         if (recoveryTimerRef.current) {
           clearTimeout(recoveryTimerRef.current);
@@ -84,19 +148,18 @@ export function useConnectionRecovery({
       }
 
       // Page became visible again
-      if (!wasConnectedRef.current) {
+      if (!wasConnectedRef.current || !shouldRecoverOnVisibleRef.current) {
         return;
       }
 
-      // Wait a moment to let LiveKit's built-in reconnection try first
-      recoveryTimerRef.current = setTimeout(() => {
-        recoveryTimerRef.current = null;
+      if (isConnectedRef.current) {
+        shouldRecoverOnVisibleRef.current = false;
+        recoveryAttemptedRef.current = false;
+        return;
+      }
 
-        // Check if still disconnected after grace period.
-        // We use the refs because the closure captures the values at setup time.
-        // The connectionState might have changed during the grace period.
-        // We'll rely on the effect dependency to handle state changes.
-      }, RECOVERY_DELAY_MS);
+      // Wait a moment to let LiveKit's built-in reconnection try first.
+      scheduleRecoveryCheck();
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -108,23 +171,5 @@ export function useConnectionRecovery({
         recoveryTimerRef.current = null;
       }
     };
-  }, []);
-
-  // When we detect the connection is disconnected AND we were previously connected,
-  // AND the page is visible (back from sleep), attempt recovery.
-  useEffect(() => {
-    if (
-      connectionState === ConnectionState.Disconnected &&
-      wasConnectedRef.current &&
-      !recoveryAttemptedRef.current &&
-      document.visibilityState === 'visible'
-    ) {
-      // Give LiveKit's built-in reconnection a grace period
-      const timer = setTimeout(() => {
-        attemptRecovery();
-      }, RECONNECT_GRACE_MS);
-
-      return () => clearTimeout(timer);
-    }
-  }, [connectionState, attemptRecovery]);
+  }, [scheduleRecoveryCheck]);
 }

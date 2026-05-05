@@ -11,6 +11,8 @@
 import { useCallback, useEffect, useState } from 'react';
 
 const KEEPALIVE_INTERVAL_MS = 25_000;
+const INITIAL_STATE_RETRY_MS = 1500;
+const INITIAL_STATE_MAX_ATTEMPTS = 2;
 
 type CallSessionStateResponse = {
   callSessionId?: string;
@@ -86,6 +88,28 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
 }
 
+function isLikelyFetchNetworkError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const message = error.message.trim().toLowerCase();
+  return (
+    message === 'failed to fetch' ||
+    message === 'fetch failed' ||
+    message === 'load failed' ||
+    message.includes('networkerror')
+  );
+}
+
+function formatCallSessionStateError(error: unknown, fallback: string, retrying = false): string {
+  if (isLikelyFetchNetworkError(error)) {
+    return retrying
+      ? 'Viventium is reconnecting to the voice runtime. Retrying call state...'
+      : 'Viventium could not reach the voice runtime for call state. Check the connection and retry.';
+  }
+  return error instanceof Error && error.message.trim() ? error.message.trim() : fallback;
+}
+
 export function useCallSessionState(
   callSessionId: string | null,
   keepAliveEnabled: boolean
@@ -116,28 +140,46 @@ export function useCallSessionState(
     }
 
     let cancelled = false;
+    let retryTimeoutId: ReturnType<typeof setTimeout> | null = null;
     const controller = new AbortController();
-    requestCallSessionState('GET', callSessionId, undefined, controller.signal)
-      .then((next) => {
-        if (cancelled) {
-          return;
-        }
-        setWingModeEnabledState(next.wingModeEnabled);
-        setCallStateError(next.message ?? null);
-      })
-      .catch((error) => {
-        if (cancelled) {
-          return;
-        }
-        if (isAbortError(error)) {
-          return;
-        }
-        setCallStateError(error instanceof Error ? error.message : 'Call session check failed.');
-      });
+    const loadState = (attempt: number) => {
+      requestCallSessionState('GET', callSessionId, undefined, controller.signal)
+        .then((next) => {
+          if (cancelled) {
+            return;
+          }
+          setWingModeEnabledState(next.wingModeEnabled);
+          setCallStateError(next.message ?? null);
+        })
+        .catch((error) => {
+          if (cancelled) {
+            return;
+          }
+          if (isAbortError(error)) {
+            return;
+          }
+          const shouldRetry =
+            isLikelyFetchNetworkError(error) && attempt + 1 < INITIAL_STATE_MAX_ATTEMPTS;
+          setCallStateError(
+            formatCallSessionStateError(error, 'Call session check failed.', shouldRetry)
+          );
+          if (shouldRetry) {
+            retryTimeoutId = setTimeout(() => {
+              retryTimeoutId = null;
+              loadState(attempt + 1);
+            }, INITIAL_STATE_RETRY_MS);
+          }
+        });
+    };
+
+    loadState(0);
 
     return () => {
       cancelled = true;
       controller.abort();
+      if (retryTimeoutId !== null) {
+        clearTimeout(retryTimeoutId);
+      }
     };
   }, [callSessionId]);
 
@@ -170,9 +212,7 @@ export function useCallSessionState(
         if (isAbortError(error)) {
           return;
         }
-        setCallStateError(
-          error instanceof Error ? error.message : 'Call session keepalive failed.'
-        );
+        setCallStateError(formatCallSessionStateError(error, 'Call session keepalive failed.'));
       }
     };
 
@@ -199,7 +239,7 @@ export function useCallSessionState(
         const next = await syncState({ touch: true, wingModeEnabled: enabled });
         return next?.wingModeEnabled === enabled;
       } catch (error) {
-        setCallStateError(error instanceof Error ? error.message : 'Wing Mode update failed.');
+        setCallStateError(formatCallSessionStateError(error, 'Wing Mode update failed.'));
         return false;
       } finally {
         setWingModePending(false);

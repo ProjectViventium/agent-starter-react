@@ -76,7 +76,9 @@ function buildCapabilityDisplayLabel(
     variant && capability
       ? (capability.variants.find((entry) => entry.id === variant)?.label ?? variant)
       : variant;
-  return variantLabel ? `${label} • ${variantLabel}` : label || buildRouteDisplayLabel(fallbackInfo);
+  return variantLabel
+    ? `${label} • ${variantLabel}`
+    : label || buildRouteDisplayLabel(fallbackInfo);
 }
 
 function resolveRequestedInfo(
