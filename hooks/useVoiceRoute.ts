@@ -102,7 +102,7 @@ function formatProviderName(value?: string | null) {
     case 'xai':
     case 'x_ai':
     case 'xai_grok_voice':
-      return 'xAI Grok Voice';
+      return 'xAI';
     case 'elevenlabs':
       return 'ElevenLabs';
     case 'cartesia':
@@ -302,10 +302,22 @@ function buildFallbackCapabilities(appConfig: AppConfig): VoiceRouteCapability[]
             recommendedLocalWhisperModel
           ),
         },
-        { id: 'tiny.en', label: buildLocalWhisperVariantLabel('tiny.en', recommendedLocalWhisperModel) },
-        { id: 'base.en', label: buildLocalWhisperVariantLabel('base.en', recommendedLocalWhisperModel) },
-        { id: 'small.en', label: buildLocalWhisperVariantLabel('small.en', recommendedLocalWhisperModel) },
-        { id: 'medium', label: buildLocalWhisperVariantLabel('medium', recommendedLocalWhisperModel) },
+        {
+          id: 'tiny.en',
+          label: buildLocalWhisperVariantLabel('tiny.en', recommendedLocalWhisperModel),
+        },
+        {
+          id: 'base.en',
+          label: buildLocalWhisperVariantLabel('base.en', recommendedLocalWhisperModel),
+        },
+        {
+          id: 'small.en',
+          label: buildLocalWhisperVariantLabel('small.en', recommendedLocalWhisperModel),
+        },
+        {
+          id: 'medium',
+          label: buildLocalWhisperVariantLabel('medium', recommendedLocalWhisperModel),
+        },
         {
           id: 'large-v3-turbo',
           label: buildLocalWhisperVariantLabel('large-v3-turbo', recommendedLocalWhisperModel),
@@ -352,12 +364,12 @@ function buildFallbackCapabilities(appConfig: AppConfig): VoiceRouteCapability[]
     {
       id: 'xai',
       modality: 'tts',
-      label: 'xAI Grok Voice',
+      label: 'xAI',
       isLocal: false,
       available: true,
       unavailableReason: null,
       variantLabel: 'Voice',
-      variants: ['Ara', 'Rex', 'Sal', 'Eve', 'Leo'].map((voice) => ({ id: voice, label: voice })),
+      variants: ['Ara', 'Eve', 'Leo', 'Rex', 'Sal'].map((voice) => ({ id: voice, label: voice })),
     },
     {
       id: 'local_chatterbox_turbo_mlx_8bit',
@@ -524,14 +536,12 @@ export function autoCorrectRequestedVoiceRoute(
   const correctedTts = autoCorrectSelection(requestedVoiceRoute.tts, ttsCapability);
   const sttMessage =
     correctedStt.message ||
-    (requestedVoiceRoute.stt.provider &&
-    (!sttCapability || !sttCapability.available)
+    (requestedVoiceRoute.stt.provider && (!sttCapability || !sttCapability.available)
       ? buildResetMessage(sttCapability, 'stt')
       : null);
   const ttsMessage =
     correctedTts.message ||
-    (requestedVoiceRoute.tts.provider &&
-    (!ttsCapability || !ttsCapability.available)
+    (requestedVoiceRoute.tts.provider && (!ttsCapability || !ttsCapability.available)
       ? buildResetMessage(ttsCapability, 'tts')
       : null);
 
