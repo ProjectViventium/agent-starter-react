@@ -389,6 +389,11 @@ function AppSession({
           onWingModeChange={(enabled) => {
             void callSessionState.setWingModeEnabled(enabled);
           }}
+          listenOnlyModeEnabled={callSessionState.listenOnlyModeEnabled}
+          listenOnlyModePending={callSessionState.listenOnlyModePending}
+          onListenOnlyModeChange={(enabled) => {
+            void callSessionState.setListenOnlyModeEnabled(enabled);
+          }}
           assistantRoute={assistantRoute}
           voiceRoute={voiceRoute}
           requestedVoiceRoute={requestedVoiceRoute}

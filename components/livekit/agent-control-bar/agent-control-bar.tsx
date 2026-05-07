@@ -1,9 +1,9 @@
 'use client';
 
-import { type HTMLAttributes, useCallback, useEffect, useMemo, useState } from 'react';
+import { type HTMLAttributes, useCallback, useEffect, useId, useMemo, useState } from 'react';
 import { Track } from 'livekit-client';
 import { useChat, useRemoteParticipants } from '@livekit/components-react';
-import { ChatTextIcon, PhoneDisconnectIcon } from '@phosphor-icons/react/dist/ssr';
+import { ChatTextIcon, EarIcon, PhoneDisconnectIcon } from '@phosphor-icons/react/dist/ssr';
 import type { AppConfig } from '@/app-config';
 import { TrackToggle } from '@/components/livekit/agent-control-bar/track-toggle';
 import { Button } from '@/components/livekit/button';
@@ -40,6 +40,9 @@ export interface AgentControlBarProps extends UseInputControlsProps {
   wingModeEnabled?: boolean;
   wingModePending?: boolean;
   onWingModeChange?: (enabled: boolean) => void;
+  listenOnlyModeEnabled?: boolean;
+  listenOnlyModePending?: boolean;
+  onListenOnlyModeChange?: (enabled: boolean) => void;
   assistantRoute?: AssistantRouteInfo | null;
   requestedVoiceRoute: VoiceRouteState;
   onRequestedVoiceRouteChange: (nextState: VoiceRouteState) => Promise<boolean> | void;
@@ -296,6 +299,9 @@ export function AgentControlBar({
   wingModeEnabled = false,
   wingModePending = false,
   onWingModeChange,
+  listenOnlyModeEnabled = false,
+  listenOnlyModePending = false,
+  onListenOnlyModeChange,
   assistantRoute = null,
   requestedVoiceRoute,
   onRequestedVoiceRouteChange,
@@ -311,6 +317,7 @@ export function AgentControlBar({
   const [chatOpen, setChatOpen] = useState(false);
   const [wingDisclaimerSeen, setWingDisclaimerSeen] = useState(false);
   const [showWingDisclaimer, setShowWingDisclaimer] = useState(false);
+  const listenOnlyModeTooltipId = useId();
   const publishPermissions = usePublishPermissions();
   const {
     micTrackRef,
@@ -324,6 +331,9 @@ export function AgentControlBar({
   } = useInputControls({ onDeviceError, saveUserChoices });
 
   const handleSendMessage = async (message: string) => {
+    if (listenOnlyModeEnabled) {
+      return;
+    }
     await send(message);
   };
 
@@ -346,6 +356,11 @@ export function AgentControlBar({
   const isAgentAvailable = participants.some((p) => p.isAgent);
   const wingModeTooltip =
     "Wing Mode: You've had a wingman. Now try a Wing AI. Viventium stays quietly aware, ignores background chatter, and only responds when you're clearly talking to it.";
+  const listenOnlyModeTooltip =
+    'Listen-Only Mode lets Viventium be here with you without interrupting. It listens through ' +
+    'the current voice route and remembers the conversation later during memory consolidation. ' +
+    'It will not answer, speak, run tools, or update live memory while this is on. Different speakers ' +
+    'can be separated only when they join as separate call participants.';
   const wingRouteSummaries = useMemo(
     () => buildWingRouteSummaries(voiceRoute, assistantRoute, appConfig),
     [appConfig, assistantRoute, voiceRoute]
@@ -385,6 +400,13 @@ export function AgentControlBar({
     onWingModeChange?.(true);
   }, [onWingModeChange]);
 
+  const handleListenOnlyModeToggle = useCallback(
+    (enabled: boolean) => {
+      onListenOnlyModeChange?.(enabled);
+    },
+    [onListenOnlyModeChange]
+  );
+
   return (
     <>
       <WingModeDisclaimer
@@ -403,7 +425,7 @@ export function AgentControlBar({
         {...props}
       >
         {/* Chat Input */}
-        {visibleControls.chat && (
+        {visibleControls.chat && !listenOnlyModeEnabled && (
           <ChatInput
             chatOpen={chatOpen}
             isAgentAvailable={isAgentAvailable}
@@ -411,8 +433,8 @@ export function AgentControlBar({
           />
         )}
 
-        <div className="flex gap-1">
-          <div className="flex grow gap-1">
+        <div className="flex flex-wrap items-center gap-1">
+          <div className="flex min-w-0 grow flex-wrap gap-1">
             {/* Toggle Microphone */}
             {visibleControls.microphone && (
               <TrackSelector
@@ -480,6 +502,31 @@ export function AgentControlBar({
               error={voiceRouteError}
             />
 
+            {onListenOnlyModeChange && (
+              <span className="group/listen-only-tooltip relative inline-flex">
+                <Toggle
+                  size="icon"
+                  variant="secondary"
+                  aria-label="Toggle Listen-Only Mode"
+                  aria-describedby={listenOnlyModeTooltipId}
+                  pressed={listenOnlyModeEnabled}
+                  disabled={listenOnlyModePending || wingModePending}
+                  onPressedChange={handleListenOnlyModeToggle}
+                  className="border border-transparent data-[state=on]:border-emerald-400/35 data-[state=on]:bg-emerald-500/15 data-[state=on]:text-emerald-700 data-[state=on]:shadow-[0_0_24px_rgba(16,185,129,0.22)] dark:data-[state=on]:text-emerald-200"
+                >
+                  <EarIcon weight="bold" />
+                  <span className="sr-only">Listen-Only Mode</span>
+                </Toggle>
+                <span
+                  id={listenOnlyModeTooltipId}
+                  role="tooltip"
+                  className="bg-popover text-popover-foreground border-border/80 pointer-events-none fixed right-4 bottom-24 left-4 z-20 w-auto max-w-none translate-x-0 rounded-lg border px-3 py-2 text-[11px] leading-5 normal-case opacity-0 shadow-[0_16px_40px_rgba(15,23,42,0.18)] transition-opacity duration-150 group-focus-within/listen-only-tooltip:opacity-100 group-hover/listen-only-tooltip:opacity-100 sm:absolute sm:right-0 sm:bottom-full sm:left-auto sm:mb-2 sm:w-72 sm:max-w-[calc(100vw-2rem)]"
+                >
+                  {listenOnlyModeTooltip}
+                </span>
+              </span>
+            )}
+
             {onWingModeChange && (
               <Toggle
                 size="icon"
@@ -487,7 +534,7 @@ export function AgentControlBar({
                 aria-label="Toggle Wing Mode"
                 title={wingModeTooltip}
                 pressed={wingModeEnabled}
-                disabled={wingModePending}
+                disabled={wingModePending || listenOnlyModePending}
                 onPressedChange={handleWingModeToggle}
                 className="border border-transparent data-[state=on]:border-cyan-400/30 data-[state=on]:bg-cyan-500/15 data-[state=on]:text-cyan-700 data-[state=on]:shadow-[0_0_24px_rgba(34,211,238,0.18)] dark:data-[state=on]:text-cyan-200"
               >
@@ -501,13 +548,13 @@ export function AgentControlBar({
           {visibleControls.leave && (
             <Button
               variant="destructive"
+              aria-label="End call"
               onClick={onDisconnect}
               disabled={!isConnected}
-              className="font-mono"
+              className="h-9 w-9 px-0 font-mono md:w-auto md:px-4"
             >
               <PhoneDisconnectIcon weight="bold" />
               <span className="hidden md:inline">END CALL</span>
-              <span className="inline md:hidden">END</span>
             </Button>
           )}
         </div>

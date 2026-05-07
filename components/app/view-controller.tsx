@@ -44,6 +44,9 @@ interface ViewControllerProps {
   wingModeEnabled?: boolean;
   wingModePending?: boolean;
   onWingModeChange?: (enabled: boolean) => void;
+  listenOnlyModeEnabled?: boolean;
+  listenOnlyModePending?: boolean;
+  onListenOnlyModeChange?: (enabled: boolean) => void;
   assistantRoute?: AssistantRouteInfo | null;
   voiceRoute: VoiceRouteMetadata;
   requestedVoiceRoute: VoiceRouteState;
@@ -63,6 +66,9 @@ export function ViewController({
   wingModeEnabled,
   wingModePending,
   onWingModeChange,
+  listenOnlyModeEnabled,
+  listenOnlyModePending,
+  onListenOnlyModeChange,
   assistantRoute,
   voiceRoute,
   requestedVoiceRoute,
@@ -106,6 +112,9 @@ export function ViewController({
           wingModeEnabled={wingModeEnabled}
           wingModePending={wingModePending}
           onWingModeChange={onWingModeChange}
+          listenOnlyModeEnabled={listenOnlyModeEnabled}
+          listenOnlyModePending={listenOnlyModePending}
+          onListenOnlyModeChange={onListenOnlyModeChange}
           assistantRoute={assistantRoute}
           requestedVoiceRoute={requestedVoiceRoute}
           onRequestedVoiceRouteChange={onRequestedVoiceRouteChange}

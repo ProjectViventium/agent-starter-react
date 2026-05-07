@@ -40,10 +40,12 @@ export function ChatInput({
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    const trimmedMessage = message.trim();
+    if (!trimmedMessage) return;
 
     try {
       setIsSending(true);
-      await onSend(message);
+      await onSend(trimmedMessage);
       setMessage('');
     } catch (error) {
       console.error(error);
@@ -55,8 +57,7 @@ export function ChatInput({
   const isDisabled = isSending || !isAgentAvailable || message.trim().length === 0;
 
   useEffect(() => {
-    if (chatOpen && isAgentAvailable) return;
-    // when not disabled refocus on input
+    if (!chatOpen || !isAgentAvailable) return;
     inputRef.current?.focus();
   }, [chatOpen, isAgentAvailable]);
 

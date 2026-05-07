@@ -8,6 +8,10 @@ import {
   useAgent,
   useChat,
 } from '@livekit/components-react';
+// === VIVENTIUM START ===
+// Feature: Keep modern-playground transcripts stable across duplicate streams.
+import { dedupeMessagesById } from '@/lib/session-message-utils';
+// === VIVENTIUM END ===
 
 type TranscriptionStreamSnapshot = {
   id: string;
@@ -163,7 +167,10 @@ export function useViventiumSessionMessages(session: UseSessionReturn) {
       )
     );
 
-    return sortMessagesByFirstSeen([...transcriptMessages, ...chat.chatMessages], firstSeenMsById);
+    return sortMessagesByFirstSeen(
+      dedupeMessagesById([...transcriptMessages, ...chat.chatMessages]),
+      firstSeenMsById
+    );
   }, [
     agent.internal.agentParticipant,
     agent.internal.workerParticipant,
