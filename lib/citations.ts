@@ -69,6 +69,25 @@ const BREAK_TAG_REGEX = /<break\s+time=["']?[^"'>]+["']?\s*\/>/gi;
 const SPEED_TAG_REGEX = /<speed\s+ratio=["']?[^"'>]+["']?\s*\/>/gi;
 const VOLUME_TAG_REGEX = /<volume\s+ratio=["']?[^"'>]+["']?\s*\/>/gi;
 const SPELL_TAG_REGEX = /<spell>([\s\S]*?)<\/spell>/gi;
+const XAI_WRAPPING_TAG_NAMES = [
+  'soft',
+  'whisper',
+  'loud',
+  'build-intensity',
+  'decrease-intensity',
+  'higher-pitch',
+  'lower-pitch',
+  'slow',
+  'fast',
+  'sing-song',
+  'singing',
+  'laugh-speak',
+  'emphasis',
+];
+const XAI_WRAPPER_REGEX = new RegExp(
+  `<(${XAI_WRAPPING_TAG_NAMES.join('|')})>([\\s\\S]*?)</\\1>`,
+  'gi'
+);
 const STAGE_DIRECTION_MIN_ALPHA = 3;
 const STAGE_DIRECTION_MAX_ALPHA = 24;
 const STAGE_DIRECTION_MAX_WORDS = 3;
@@ -140,6 +159,16 @@ const stripBracketStageDirections = (text: string): string => {
   return out;
 };
 
+const stripXaiWrappingTags = (text: string): string => {
+  let cleaned = text || '';
+  let previous: string;
+  do {
+    previous = cleaned;
+    cleaned = cleaned.replace(XAI_WRAPPER_REGEX, '$2');
+  } while (cleaned !== previous);
+  return cleaned;
+};
+
 export const stripVoiceControlTagsForDisplay = (text: string): string => {
   if (!text) {
     return '';
@@ -151,6 +180,7 @@ export const stripVoiceControlTagsForDisplay = (text: string): string => {
   cleaned = cleaned.replace(SPEED_TAG_REGEX, '');
   cleaned = cleaned.replace(VOLUME_TAG_REGEX, '');
   cleaned = cleaned.replace(SPELL_TAG_REGEX, '$1');
+  cleaned = stripXaiWrappingTags(cleaned);
   cleaned = stripBracketStageDirections(cleaned);
   cleaned = cleaned.replace(/[ \t]{2,}/g, ' ');
   // Preserve chunk-boundary whitespace for streamed assistant text. Trimming here

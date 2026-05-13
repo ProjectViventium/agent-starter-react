@@ -65,6 +65,9 @@ interface SessionViewProps {
   wingModeEnabled?: boolean;
   wingModePending?: boolean;
   onWingModeChange?: (enabled: boolean) => void;
+  listenOnlyModeEnabled?: boolean;
+  listenOnlyModePending?: boolean;
+  onListenOnlyModeChange?: (enabled: boolean) => void;
   assistantRoute?: AssistantRouteInfo | null;
   requestedVoiceRoute: VoiceRouteState;
   onRequestedVoiceRouteChange: (nextState: VoiceRouteState) => Promise<boolean> | void;
@@ -78,6 +81,9 @@ export const SessionView = ({
   wingModeEnabled = false,
   wingModePending = false,
   onWingModeChange,
+  listenOnlyModeEnabled = false,
+  listenOnlyModePending = false,
+  onListenOnlyModeChange,
   assistantRoute,
   requestedVoiceRoute,
   onRequestedVoiceRouteChange,
@@ -112,7 +118,9 @@ export const SessionView = ({
   }, [messages]);
 
   const preConnectMessage = isAgentAvailable
-    ? 'Agent is listening, ask it a question'
+    ? listenOnlyModeEnabled
+      ? 'Viventium is here with you, just listening and remembering alongside you.'
+      : 'Agent is listening, ask it a question'
     : isInputBlocked
       ? 'Turn on your microphone to bring Viventium into the room'
       : 'Connecting Viventium to the room...';
@@ -158,6 +166,9 @@ export const SessionView = ({
             wingModeEnabled={wingModeEnabled}
             wingModePending={wingModePending}
             onWingModeChange={onWingModeChange}
+            listenOnlyModeEnabled={listenOnlyModeEnabled}
+            listenOnlyModePending={listenOnlyModePending}
+            onListenOnlyModeChange={onListenOnlyModeChange}
             assistantRoute={assistantRoute}
             requestedVoiceRoute={requestedVoiceRoute}
             onRequestedVoiceRouteChange={onRequestedVoiceRouteChange}

@@ -2,13 +2,13 @@
 
 /* VIVENTIUM START
  * Purpose: Viventium agent-starter customization.
- * Feature: Call-session state hook for Wing Mode + keepalive
+ * Feature: Call-session state hook for Wing Mode, Listen-Only Mode, and keepalive
  *
  * Why:
  * - Keep active calls alive through long silence windows by periodically touching the call session.
- * - Expose a single persisted Wing Mode toggle for the modern playground.
+ * - Expose persisted call-mode toggles for the modern playground.
  * VIVENTIUM END */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 const KEEPALIVE_INTERVAL_MS = 25_000;
 const INITIAL_STATE_RETRY_MS = 1500;
@@ -20,6 +20,7 @@ type CallSessionStateResponse = {
   expiresAtMs?: number | null;
   wingModeEnabled?: boolean;
   shadowModeEnabled?: boolean;
+  listenOnlyModeEnabled?: boolean;
   message?: string;
   error?: string;
 };
@@ -27,15 +28,21 @@ type CallSessionStateResponse = {
 export type UseCallSessionStateResult = {
   wingModeEnabled: boolean;
   wingModePending: boolean;
+  listenOnlyModeEnabled: boolean;
+  listenOnlyModePending: boolean;
   callStateError: string | null;
   setWingModeEnabled: (enabled: boolean) => Promise<boolean>;
+  setListenOnlyModeEnabled: (enabled: boolean) => Promise<boolean>;
 };
 
 function normalizeResponse(payload: CallSessionStateResponse | null | undefined) {
+  const listenOnlyModeEnabled = payload?.listenOnlyModeEnabled === true;
   return {
     wingModeEnabled:
-      payload?.wingModeEnabled === true ||
-      (typeof payload?.wingModeEnabled !== 'boolean' && payload?.shadowModeEnabled === true),
+      !listenOnlyModeEnabled &&
+      (payload?.wingModeEnabled === true ||
+        (typeof payload?.wingModeEnabled !== 'boolean' && payload?.shadowModeEnabled === true)),
+    listenOnlyModeEnabled,
     expiresAtMs:
       typeof payload?.expiresAtMs === 'number' && Number.isFinite(payload.expiresAtMs)
         ? payload.expiresAtMs
@@ -116,25 +123,52 @@ export function useCallSessionState(
 ): UseCallSessionStateResult {
   const [wingModeEnabled, setWingModeEnabledState] = useState(false);
   const [wingModePending, setWingModePending] = useState(false);
+  const [listenOnlyModeEnabled, setListenOnlyModeEnabledState] = useState(false);
+  const [listenOnlyModePending, setListenOnlyModePending] = useState(false);
   const [callStateError, setCallStateError] = useState<string | null>(null);
+  const stateRequestGenerationRef = useRef(0);
+  const modeMutationPendingRef = useRef(false);
+
+  const applyState = useCallback((next: ReturnType<typeof normalizeResponse>) => {
+    setWingModeEnabledState(next.wingModeEnabled);
+    setListenOnlyModeEnabledState(next.listenOnlyModeEnabled);
+    setCallStateError(next.message ?? null);
+  }, []);
+
+  const beginStateRequest = useCallback(() => {
+    stateRequestGenerationRef.current += 1;
+    return stateRequestGenerationRef.current;
+  }, []);
+
+  const shouldApplyStateResponse = useCallback(
+    (requestGeneration: number, blockedByModeMutation = false) =>
+      !blockedByModeMutation &&
+      requestGeneration === stateRequestGenerationRef.current,
+    []
+  );
 
   const syncState = useCallback(
     async (body?: Record<string, unknown>) => {
       if (!callSessionId) {
         return null;
       }
+      const requestGeneration = beginStateRequest();
       const next = await requestCallSessionState(body ? 'POST' : 'GET', callSessionId, body);
-      setWingModeEnabledState(next.wingModeEnabled);
-      setCallStateError(next.message ?? null);
+      if (!shouldApplyStateResponse(requestGeneration)) {
+        return null;
+      }
+      applyState(next);
       return next;
     },
-    [callSessionId]
+    [applyState, beginStateRequest, callSessionId, shouldApplyStateResponse]
   );
 
   useEffect(() => {
     if (!callSessionId) {
       setWingModeEnabledState(false);
       setWingModePending(false);
+      setListenOnlyModeEnabledState(false);
+      setListenOnlyModePending(false);
       setCallStateError(null);
       return;
     }
@@ -143,13 +177,17 @@ export function useCallSessionState(
     let retryTimeoutId: ReturnType<typeof setTimeout> | null = null;
     const controller = new AbortController();
     const loadState = (attempt: number) => {
+      const requestGeneration = beginStateRequest();
+      const blockedByModeMutation = modeMutationPendingRef.current;
       requestCallSessionState('GET', callSessionId, undefined, controller.signal)
         .then((next) => {
-          if (cancelled) {
+          if (
+            cancelled ||
+            !shouldApplyStateResponse(requestGeneration, blockedByModeMutation)
+          ) {
             return;
           }
-          setWingModeEnabledState(next.wingModeEnabled);
-          setCallStateError(next.message ?? null);
+          applyState(next);
         })
         .catch((error) => {
           if (cancelled) {
@@ -181,7 +219,7 @@ export function useCallSessionState(
         clearTimeout(retryTimeoutId);
       }
     };
-  }, [callSessionId]);
+  }, [applyState, beginStateRequest, callSessionId, shouldApplyStateResponse]);
 
   useEffect(() => {
     if (!callSessionId || !keepAliveEnabled) {
@@ -193,6 +231,8 @@ export function useCallSessionState(
     const tick = async () => {
       activeController?.abort();
       activeController = new AbortController();
+      const requestGeneration = beginStateRequest();
+      const blockedByModeMutation = modeMutationPendingRef.current;
       try {
         const next = await requestCallSessionState(
           'POST',
@@ -200,11 +240,13 @@ export function useCallSessionState(
           { touch: true },
           activeController.signal
         );
-        if (cancelled) {
+        if (
+          cancelled ||
+          !shouldApplyStateResponse(requestGeneration, blockedByModeMutation)
+        ) {
           return;
         }
-        setWingModeEnabledState(next.wingModeEnabled);
-        setCallStateError(next.message ?? null);
+        applyState(next);
       } catch (error) {
         if (cancelled) {
           return;
@@ -226,7 +268,7 @@ export function useCallSessionState(
       activeController?.abort();
       window.clearInterval(intervalId);
     };
-  }, [callSessionId, keepAliveEnabled]);
+  }, [applyState, beginStateRequest, callSessionId, keepAliveEnabled, shouldApplyStateResponse]);
 
   const setWingModeEnabled = useCallback(
     async (enabled: boolean) => {
@@ -235,6 +277,7 @@ export function useCallSessionState(
       }
 
       setWingModePending(true);
+      modeMutationPendingRef.current = true;
       try {
         const next = await syncState({ touch: true, wingModeEnabled: enabled });
         return next?.wingModeEnabled === enabled;
@@ -242,7 +285,30 @@ export function useCallSessionState(
         setCallStateError(formatCallSessionStateError(error, 'Wing Mode update failed.'));
         return false;
       } finally {
+        modeMutationPendingRef.current = false;
         setWingModePending(false);
+      }
+    },
+    [callSessionId, syncState]
+  );
+
+  const setListenOnlyModeEnabled = useCallback(
+    async (enabled: boolean) => {
+      if (!callSessionId) {
+        return false;
+      }
+
+      setListenOnlyModePending(true);
+      modeMutationPendingRef.current = true;
+      try {
+        const next = await syncState({ touch: true, listenOnlyModeEnabled: enabled });
+        return next?.listenOnlyModeEnabled === enabled;
+      } catch (error) {
+        setCallStateError(formatCallSessionStateError(error, 'Listen-Only Mode update failed.'));
+        return false;
+      } finally {
+        modeMutationPendingRef.current = false;
+        setListenOnlyModePending(false);
       }
     },
     [callSessionId, syncState]
@@ -251,7 +317,10 @@ export function useCallSessionState(
   return {
     wingModeEnabled,
     wingModePending,
+    listenOnlyModeEnabled,
+    listenOnlyModePending,
     callStateError,
     setWingModeEnabled,
+    setListenOnlyModeEnabled,
   };
 }

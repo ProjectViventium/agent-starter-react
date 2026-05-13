@@ -54,6 +54,7 @@ async function proxyStateRequest(url: URL, method: 'GET' | 'POST', body?: Record
     const normalized = payload as {
       wingModeEnabled?: unknown;
       shadowModeEnabled?: unknown;
+      listenOnlyModeEnabled?: unknown;
     };
     if (
       typeof normalized.wingModeEnabled !== 'boolean' &&
@@ -66,6 +67,10 @@ async function proxyStateRequest(url: URL, method: 'GET' | 'POST', body?: Record
       typeof normalized.wingModeEnabled === 'boolean'
     ) {
       normalized.shadowModeEnabled = normalized.wingModeEnabled;
+    }
+    if (normalized.listenOnlyModeEnabled === true) {
+      normalized.wingModeEnabled = false;
+      normalized.shadowModeEnabled = false;
     }
   }
 
@@ -97,6 +102,7 @@ export async function POST(req: Request) {
       callSessionId?: unknown;
       wingModeEnabled?: unknown;
       shadowModeEnabled?: unknown;
+      listenOnlyModeEnabled?: unknown;
       touch?: unknown;
     };
     const callSessionId = typeof body.callSessionId === 'string' ? body.callSessionId.trim() : '';
@@ -111,6 +117,9 @@ export async function POST(req: Request) {
       proxyBody.wingModeEnabled = body.wingModeEnabled;
     } else if (typeof body.shadowModeEnabled === 'boolean') {
       proxyBody.shadowModeEnabled = body.shadowModeEnabled;
+    }
+    if (typeof body.listenOnlyModeEnabled === 'boolean') {
+      proxyBody.listenOnlyModeEnabled = body.listenOnlyModeEnabled;
     }
 
     return await proxyStateRequest(buildTargetUrl(callSessionId), 'POST', proxyBody);
