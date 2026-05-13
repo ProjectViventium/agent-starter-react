@@ -24,6 +24,7 @@ export interface AppConfig {
   agentName?: string;
 
   voiceSttProvider?: string;
+  voiceSttModel?: string;
   voiceTtsProvider?: string;
   voiceTtsFallbackProvider?: string;
   openaiAuthMode?: string;
@@ -57,6 +58,7 @@ export const APP_CONFIG_DEFAULTS: AppConfig = {
   // agent dispatch configuration
   agentName: process.env.AGENT_NAME ?? undefined,
   voiceSttProvider: process.env.VIVENTIUM_STT_PROVIDER ?? undefined,
+  voiceSttModel: process.env.VIVENTIUM_STT_MODEL ?? undefined,
   voiceTtsProvider: process.env.VIVENTIUM_TTS_PROVIDER ?? undefined,
   voiceTtsFallbackProvider: process.env.VIVENTIUM_TTS_PROVIDER_FALLBACK ?? undefined,
   openaiAuthMode: process.env.VIVENTIUM_OPENAI_AUTH_MODE ?? undefined,

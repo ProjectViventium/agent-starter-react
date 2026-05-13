@@ -139,13 +139,22 @@ function buildLocalWhisperVariantLabel(modelId: string, recommendedModel: string
   const labels: Record<string, string> = {
     'tiny.en': 'Fastest',
     'base.en': 'Light',
+    small: 'Balanced',
     'small.en': 'Balanced',
     medium: 'More accurate',
+    'medium.en': 'More accurate',
+    'large-v3': 'Highest accuracy',
+    'large-v3-q5_0': 'Highest accuracy quantized',
     'large-v3-turbo': 'Best quality',
+    'large-v3-turbo-q5_0': 'Best quality quantized',
   };
   const descriptor = labels[modelId];
   const baseLabel = descriptor ? `${descriptor} - ${modelId}` : modelId;
   return modelId === recommendedModel ? `${baseLabel} (Recommended)` : baseLabel;
+}
+
+function getRecommendedLocalWhisperModel(appConfig: AppConfig) {
+  return appConfig.voiceSttModel || 'large-v3-turbo';
 }
 
 function normalizeSelection(value: unknown): VoiceRouteSelection {
@@ -258,7 +267,7 @@ function normalizeCapabilities(
 }
 
 function buildFallbackCapabilities(appConfig: AppConfig): VoiceRouteCapability[] {
-  const recommendedLocalWhisperModel = 'large-v3-turbo';
+  const recommendedLocalWhisperModel = getRecommendedLocalWhisperModel(appConfig);
   return [
     {
       id: 'openai',
@@ -388,6 +397,7 @@ function buildFallbackCapabilities(appConfig: AppConfig): VoiceRouteCapability[]
 
 export function buildFallbackVoiceRoute(appConfig: AppConfig): VoiceRouteMetadata {
   const sttProvider = normalizeProviderName(appConfig.voiceSttProvider) || 'pywhispercpp';
+  const recommendedLocalWhisperModel = getRecommendedLocalWhisperModel(appConfig);
   const ttsProvider = normalizeProviderName(appConfig.voiceTtsProvider) || 'openai';
   const ttsVariant =
     ttsProvider === 'openai'
@@ -402,7 +412,12 @@ export function buildFallbackVoiceRoute(appConfig: AppConfig): VoiceRouteMetadat
     stt: normalizeRouteInfo(null, {
       provider: sttProvider,
       label: formatProviderName(sttProvider),
-      variant: sttProvider === 'openai' ? 'gpt-4o-mini-transcribe' : null,
+      variant:
+        sttProvider === 'openai'
+          ? 'gpt-4o-mini-transcribe'
+          : sttProvider === 'pywhispercpp'
+            ? recommendedLocalWhisperModel
+            : null,
       variantType: sttProvider === 'assemblyai' ? 'Engine' : 'Model',
     }),
     tts: normalizeRouteInfo(null, {
