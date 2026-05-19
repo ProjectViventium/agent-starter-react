@@ -21,6 +21,7 @@ type VoiceSettingsResponse = {
 
 const INITIAL_LOAD_RETRY_MS = 1500;
 const INITIAL_LOAD_MAX_ATTEMPTS = 2;
+const VOICE_SETTINGS_REQUEST_TIMEOUT_MS = 5000;
 
 export type AssistantRouteAssignment = {
   provider: string | null;
@@ -75,11 +76,33 @@ function isLikelyFetchNetworkError(error: unknown): boolean {
   );
 }
 
+class VoiceSettingsTimeoutError extends Error {
+  constructor() {
+    super(
+      'Viventium could not load voice settings before the voice runtime responded. You can still start the call; retry voice settings after the runtime is ready.'
+    );
+    this.name = 'VoiceSettingsTimeoutError';
+  }
+}
+
+function isVoiceSettingsTimeoutError(error: unknown): error is VoiceSettingsTimeoutError {
+  return error instanceof VoiceSettingsTimeoutError;
+}
+
+function isTransientVoiceSettingsLoadError(error: unknown): boolean {
+  return isLikelyFetchNetworkError(error) || isVoiceSettingsTimeoutError(error);
+}
+
 function formatVoiceSettingsError(error: unknown, fallback: string, retrying = false): string {
   if (isLikelyFetchNetworkError(error)) {
     return retrying
       ? 'Viventium is reconnecting to the voice runtime. Retrying voice settings...'
       : 'Viventium could not reach the voice runtime for voice settings. Check the connection and retry.';
+  }
+  if (isVoiceSettingsTimeoutError(error)) {
+    return retrying
+      ? 'Viventium is reconnecting to the voice runtime. Retrying voice settings...'
+      : error.message;
   }
   return error instanceof Error && error.message.trim() ? error.message.trim() : fallback;
 }
@@ -144,21 +167,48 @@ async function requestVoiceSettings(
       ? `/api/call-session-voice-settings?callSessionId=${encodeURIComponent(callSessionId)}`
       : '/api/call-session-voice-settings';
 
-  const response = await fetch(url, {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body:
-      method === 'POST'
-        ? JSON.stringify({
-            callSessionId,
-            requestedVoiceRoute,
-          })
-        : undefined,
-    cache: 'no-store',
-    signal,
-  });
+  const requestController = new AbortController();
+  let timedOut = false;
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    requestController.abort();
+  }, VOICE_SETTINGS_REQUEST_TIMEOUT_MS);
+  const abortFromParent = () => {
+    requestController.abort();
+  };
+
+  if (signal?.aborted) {
+    requestController.abort();
+  } else {
+    signal?.addEventListener('abort', abortFromParent, { once: true });
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body:
+        method === 'POST'
+          ? JSON.stringify({
+              callSessionId,
+              requestedVoiceRoute,
+            })
+          : undefined,
+      cache: 'no-store',
+      signal: requestController.signal,
+    });
+  } catch (error) {
+    if (timedOut) {
+      throw new VoiceSettingsTimeoutError();
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+    signal?.removeEventListener('abort', abortFromParent);
+  }
 
   const payload = (await response.json().catch(() => ({}))) as VoiceSettingsResponse;
   if (!response.ok) {
@@ -246,7 +296,8 @@ export function useCallSessionVoiceSettings(
             return;
           }
           const shouldRetry =
-            isLikelyFetchNetworkError(nextError) && attempt + 1 < INITIAL_LOAD_MAX_ATTEMPTS;
+            isTransientVoiceSettingsLoadError(nextError) &&
+            attempt + 1 < INITIAL_LOAD_MAX_ATTEMPTS;
           setError(
             formatVoiceSettingsError(nextError, 'Unable to load voice settings.', shouldRetry)
           );

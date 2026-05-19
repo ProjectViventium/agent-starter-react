@@ -4,7 +4,7 @@
  * VIVENTIUM END */
 import { NextResponse } from 'next/server';
 import { AccessToken, AgentDispatchClient } from 'livekit-server-sdk';
-import { RoomConfiguration } from '@livekit/protocol';
+import { RoomAgentDispatch, RoomConfiguration } from '@livekit/protocol';
 
 const API_KEY = process.env.LIVEKIT_API_KEY;
 const API_SECRET = process.env.LIVEKIT_API_SECRET;
@@ -18,9 +18,16 @@ const VIVENTIUM_CALL_SESSION_SECRET = process.env.VIVENTIUM_CALL_SESSION_SECRET;
  * VIVENTIUM END */
 const VIVENTIUM_PUBLIC_PLAYGROUND_URL = process.env.VIVENTIUM_PUBLIC_PLAYGROUND_URL;
 const VIVENTIUM_PUBLIC_LIVEKIT_URL = process.env.VIVENTIUM_PUBLIC_LIVEKIT_URL;
+const VIVENTIUM_LIVEKIT_AGENT_DISPATCH_MODE = process.env.VIVENTIUM_LIVEKIT_AGENT_DISPATCH_MODE;
 const ALLOW_DIRECT_AGENT_DISPATCH =
   process.env.VIVENTIUM_ALLOW_DIRECT_AGENT_DISPATCH === '1' ||
   process.env.VIVENTIUM_ALLOW_DIRECT_AGENT_DISPATCH === 'true';
+const CALL_SESSION_VOICE_SETTINGS_TIMEOUT_MS = 5000;
+
+function getCallSessionVoiceSettingsTimeoutMs() {
+  const parsed = Number(process.env.VIVENTIUM_CALL_SESSION_VOICE_SETTINGS_TIMEOUT_MS || '');
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : CALL_SESSION_VOICE_SETTINGS_TIMEOUT_MS;
+}
 
 type TokenRequest = {
   room_name: string;
@@ -48,6 +55,11 @@ type TokenRequest = {
 type CallSessionVoiceSettingsResponse = {
   requestedVoiceRoute?: unknown;
   savedVoiceRoute?: unknown;
+};
+
+type PendingDispatchConfirmation = {
+  callSessionId: string;
+  claimId: string;
 };
 
 // don't cache the results
@@ -140,6 +152,32 @@ function normalizeOptions(body: unknown): TokenRequest {
     agentName: options.agentName ?? options.agent_name ?? agentFromRoomConfig,
     agentMetadata: options.agentMetadata ?? options.agent_metadata ?? metadataFromRoomConfig,
   };
+}
+
+function addAgentDispatchToRoomConfig(
+  options: TokenRequest,
+  agentName: string,
+  agentMetadata: string | undefined
+): void {
+  const existingConfig = options.room_config ?? options.roomConfig;
+  const roomConfig = existingConfig
+    ? RoomConfiguration.fromJson(existingConfig)
+    : new RoomConfiguration();
+  const metadata =
+    typeof agentMetadata === 'string' && agentMetadata.length > 0 ? agentMetadata : undefined;
+  const existingAgent = roomConfig.agents.find((entry) => entry.agentName === agentName);
+
+  if (existingAgent) {
+    if (metadata !== undefined) {
+      existingAgent.metadata = metadata;
+    }
+  } else {
+    roomConfig.agents.push(new RoomAgentDispatch({ agentName, metadata }));
+  }
+
+  const nextConfig = roomConfig.toJson() as ReturnType<RoomConfiguration['toJson']>;
+  options.room_config = nextConfig;
+  options.roomConfig = nextConfig;
 }
 
 function extractDeepLinkFallbacks(req: Request) {
@@ -287,14 +325,29 @@ async function fetchCallSessionVoiceSettings(
     `/api/viventium/calls/${encodeURIComponent(callSessionId)}/voice-settings`,
     VIVENTIUM_LIBRECHAT_ORIGIN
   );
-  const resp = await fetch(url.toString(), {
-    method: 'GET',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-VIVENTIUM-CALL-SECRET': VIVENTIUM_CALL_SESSION_SECRET,
-    },
-    cache: 'no-store',
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, getCallSessionVoiceSettingsTimeoutMs());
+  let resp: Response;
+  try {
+    resp = await fetch(url.toString(), {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-VIVENTIUM-CALL-SECRET': VIVENTIUM_CALL_SESSION_SECRET,
+      },
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      return null;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
   if (!resp.ok) {
     return null;
   }
@@ -347,6 +400,45 @@ function dispatchRequiresCallSession(): boolean {
     Boolean(VIVENTIUM_LIBRECHAT_ORIGIN) &&
     Boolean(VIVENTIUM_CALL_SESSION_SECRET)
   );
+}
+
+function callSessionUsesExplicitAgentDispatch(): boolean {
+  const mode = (VIVENTIUM_LIVEKIT_AGENT_DISPATCH_MODE || '').trim().toLowerCase();
+  return mode !== 'token_room_config' && mode !== 'room_config';
+}
+
+async function ensureExplicitAgentDispatch(
+  roomName: string,
+  agentName: string,
+  agentMetadata: string | undefined,
+  options: { forceCreate?: boolean } = {}
+): Promise<void> {
+  const host =
+    toDispatchHost(process.env.LIVEKIT_API_HOST) ??
+    toDispatchHost(process.env.LIVEKIT_URL) ??
+    toDispatchHost(process.env.NEXT_PUBLIC_LIVEKIT_URL);
+
+  if (!host) {
+    throw new Error('LIVEKIT_API_HOST/LIVEKIT_URL is not configured for dispatch');
+  }
+
+  const dispatch = new AgentDispatchClient(host, API_KEY, API_SECRET);
+  let already = false;
+  if (options.forceCreate !== true) {
+    const existing = await dispatch.listDispatch(roomName);
+    // Token room-config entries can appear in ListDispatch without a real dispatch id. Only an
+    // explicit dispatch id proves the worker assignment already exists.
+    already = existing.some(
+      (entry) =>
+        entry.agentName === agentName && typeof entry.id === 'string' && entry.id.length > 0
+    );
+  }
+  if (options.forceCreate === true || !already) {
+    await dispatch.createDispatch(roomName, agentName, {
+      metadata:
+        typeof agentMetadata === 'string' && agentMetadata.length > 0 ? agentMetadata : undefined,
+    });
+  }
 }
 
 async function claimViventiumDispatch(
@@ -467,6 +559,7 @@ export async function POST(req: Request) {
 
     const agentName = options.agentName;
     const agentMetadata = options.agentMetadata;
+    let pendingDispatchConfirmation: PendingDispatchConfirmation | null = null;
     if (agentName && agentName.trim().length > 0) {
       const callSessionId = currentCallSessionId;
       if (!callSessionId && dispatchRequiresCallSession()) {
@@ -479,37 +572,11 @@ export async function POST(req: Request) {
         );
       }
 
-      const host =
-        toDispatchHost(process.env.LIVEKIT_API_HOST) ??
-        toDispatchHost(process.env.LIVEKIT_URL) ??
-        toDispatchHost(process.env.NEXT_PUBLIC_LIVEKIT_URL);
-
-      if (!host) {
-        return NextResponse.json(
-          { message: 'LIVEKIT_API_HOST/LIVEKIT_URL is not configured for dispatch' },
-          { status: 500 }
-        );
-      }
-
-      let dispatchClaimId: string | null = null;
-      let shouldCreateDispatch = true;
-      let shouldReclaimConfirmedDispatch = false;
       if (callSessionId) {
         try {
           const claim = await claimViventiumDispatch(callSessionId, options.room_name, agentName);
           const claimStatus = claim?.status ?? '';
-          if (claimStatus === 'in_flight') {
-            shouldCreateDispatch = false;
-          } else if (claimStatus === 'already') {
-            /* VIVENTIUM START
-             * Purpose: A persisted dispatch confirmation can outlive LiveKit's in-memory dispatch
-             * after a local runtime restart. Still verify/recreate the LiveKit dispatch below.
-             * VIVENTIUM END */
-            shouldCreateDispatch = true;
-            shouldReclaimConfirmedDispatch = true;
-          } else if (claimStatus === 'claimed') {
-            dispatchClaimId = typeof claim?.claimId === 'string' ? claim.claimId : null;
-          } else if (claimStatus === 'expired') {
+          if (claimStatus === 'expired') {
             return NextResponse.json(
               {
                 message: 'This voice call session expired. Start a fresh call from Viventium.',
@@ -517,55 +584,73 @@ export async function POST(req: Request) {
               { status: 410 }
             );
           }
-        } catch (error) {
-          console.error('Error claiming Viventium dispatch lease:', error);
-          // Fall back to legacy behavior if claim endpoint is unavailable.
-        }
-      }
-
-      try {
-        const dispatch = new AgentDispatchClient(host, API_KEY, API_SECRET);
-        if (shouldCreateDispatch) {
-          const existing = await dispatch.listDispatch(options.room_name);
-          const already = existing.some((entry) => entry.agentName === agentName);
-          if (!already) {
-            if (callSessionId && shouldReclaimConfirmedDispatch) {
-              const reclaim = await claimViventiumDispatch(
-                callSessionId,
-                options.room_name,
-                agentName,
-                { reclaimConfirmed: true }
-              );
-              const reclaimStatus = reclaim?.status ?? '';
-              if (reclaimStatus === 'claimed') {
-                dispatchClaimId = typeof reclaim?.claimId === 'string' ? reclaim.claimId : null;
-              } else {
-                shouldCreateDispatch = false;
-              }
-            }
+          const useExplicitAgentDispatch = callSessionUsesExplicitAgentDispatch();
+          if (!useExplicitAgentDispatch) {
+            addAgentDispatchToRoomConfig(options, agentName, agentMetadata);
           }
-          if (shouldCreateDispatch && !already) {
-            await dispatch.createDispatch(options.room_name, agentName, {
-              metadata:
-                typeof agentMetadata === 'string' && agentMetadata.length > 0
-                  ? agentMetadata
-                  : undefined,
+          const claimId = typeof claim?.claimId === 'string' ? claim.claimId : null;
+          if (claimStatus === 'claimed' && claimId) {
+            pendingDispatchConfirmation = { callSessionId, claimId };
+          }
+          if (
+            useExplicitAgentDispatch &&
+            (claimStatus === 'claimed' || claimStatus === 'already')
+          ) {
+            await ensureExplicitAgentDispatch(options.room_name, agentName, agentMetadata, {
+              forceCreate: claimStatus === 'claimed',
             });
           }
+        } catch (error) {
+          console.error('Error claiming Viventium dispatch lease:', error);
+          if (pendingDispatchConfirmation) {
+            await confirmViventiumDispatch(
+              pendingDispatchConfirmation.callSessionId,
+              pendingDispatchConfirmation.claimId,
+              'failed',
+              error
+            ).catch((confirmError) => {
+              console.error('Error releasing failed Viventium dispatch claim:', confirmError);
+            });
+          }
+          return NextResponse.json(
+            {
+              message:
+                'Viventium could not prepare this voice call session. Please try starting the call again.',
+            },
+            { status: 503 }
+          );
         }
-        if (callSessionId && dispatchClaimId) {
-          await confirmViventiumDispatch(callSessionId, dispatchClaimId, 'created');
+      } else {
+        try {
+          await ensureExplicitAgentDispatch(options.room_name, agentName, agentMetadata);
+        } catch (error) {
+          console.error('Error creating agent dispatch:', error);
+          return NextResponse.json({ message: 'Agent dispatch failed' }, { status: 500 });
         }
-      } catch (error) {
-        if (callSessionId && dispatchClaimId) {
-          await confirmViventiumDispatch(callSessionId, dispatchClaimId, 'failed', error);
-        }
-        console.error('Error creating agent dispatch:', error);
-        return NextResponse.json({ message: 'Agent dispatch failed' }, { status: 500 });
       }
     }
 
-    const participantToken = await createToken(options);
+    let participantToken: string;
+    try {
+      participantToken = await createToken(options);
+      if (pendingDispatchConfirmation) {
+        await confirmViventiumDispatch(
+          pendingDispatchConfirmation.callSessionId,
+          pendingDispatchConfirmation.claimId,
+          'created'
+        );
+      }
+    } catch (error) {
+      if (pendingDispatchConfirmation) {
+        await confirmViventiumDispatch(
+          pendingDispatchConfirmation.callSessionId,
+          pendingDispatchConfirmation.claimId,
+          'failed',
+          error
+        );
+      }
+      throw error;
+    }
     const response = {
       serverUrl: browserLiveKitUrl,
       roomName: options.room_name,
