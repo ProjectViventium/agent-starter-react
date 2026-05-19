@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ConnectionState,
   TokenSource,
@@ -57,6 +57,17 @@ type AgentTokenOptions = TokenSourceFetchOptions & {
 const VIVENTIUM_CALL_AGENT_CONNECT_TIMEOUT_MS = 90_000;
 const CONNECTION_DETAILS_RETRY_MS = 1500;
 const CONNECTION_DETAILS_MAX_ATTEMPTS = 2;
+const CONNECTION_DETAILS_CACHE_MS = 2_000;
+const START_LATCH_WATCHDOG_MS = 1_000;
+const MICROPHONE_START_TIMEOUT_MS = 15_000;
+
+type ConnectionDetailsCacheEntry = {
+  promise?: Promise<ConnectionDetails>;
+  value?: ConnectionDetails;
+  createdAt: number;
+};
+
+const connectionDetailsCache = new Map<string, ConnectionDetailsCacheEntry>();
 
 type DeepLinkState = {
   tokenOptions?: AgentTokenOptions;
@@ -144,6 +155,22 @@ function normalizeStartError(error: unknown): string {
   }
   if (error instanceof Error) {
     const message = error.message.trim();
+    const normalizedName = error.name.trim().toLowerCase();
+    const normalizedMessage = message.toLowerCase();
+    if (
+      normalizedName === 'notallowederror' ||
+      normalizedMessage.includes('permission denied') ||
+      normalizedMessage.includes('permission was denied')
+    ) {
+      return 'Microphone permission was denied. Allow microphone access for this site and start the call again.';
+    }
+    if (
+      normalizedName === 'notfounderror' ||
+      normalizedMessage.includes('requested device not found') ||
+      normalizedMessage.includes('no microphone')
+    ) {
+      return 'Viventium could not find a microphone. Connect or enable a microphone and start the call again.';
+    }
     if (message) {
       return message;
     }
@@ -155,57 +182,123 @@ async function wait(ms: number): Promise<void> {
   await new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function stableCacheStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableCacheStringify(item)).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entryValue]) => entryValue !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right));
+    return `{${entries
+      .map(([key, entryValue]) => `${JSON.stringify(key)}:${stableCacheStringify(entryValue)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timeoutId: number | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = window.setTimeout(() => reject(new Error(message)), ms);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId);
+    }
+  }
+}
+
 function getConnectionDetailsTokenSource(fallbackOptions?: AgentTokenOptions): TokenSourceFixed {
   return TokenSource.literal(async (options?: AgentTokenOptions): Promise<ConnectionDetails> => {
     const mergedOptions = {
       ...(fallbackOptions ?? {}),
       ...(options ?? {}),
     };
-    let response: Response;
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        response = await fetch('/api/connection-details', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(mergedOptions),
-          cache: 'no-store',
-        });
-        break;
-      } catch (error) {
-        const shouldRetry =
-          isLikelyFetchNetworkError(error) && attempt + 1 < CONNECTION_DETAILS_MAX_ATTEMPTS;
-        if (!shouldRetry) {
-          throw new Error(normalizeStartError(error));
+    const cacheKey = stableCacheStringify(mergedOptions);
+    const cached = connectionDetailsCache.get(cacheKey);
+    if (cached) {
+      if (cached.promise) {
+        return cached.promise;
+      }
+      if (cached.value && Date.now() - cached.createdAt < CONNECTION_DETAILS_CACHE_MS) {
+        return cached.value;
+      }
+    }
+
+    const connectionDetailsPromise = (async () => {
+      let response: Response;
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          response = await fetch('/api/connection-details', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(mergedOptions),
+            cache: 'no-store',
+          });
+          break;
+        } catch (error) {
+          const shouldRetry =
+            isLikelyFetchNetworkError(error) && attempt + 1 < CONNECTION_DETAILS_MAX_ATTEMPTS;
+          if (!shouldRetry) {
+            throw new Error(normalizeStartError(error));
+          }
+          await wait(CONNECTION_DETAILS_RETRY_MS);
         }
-        await wait(CONNECTION_DETAILS_RETRY_MS);
+      }
+
+      let payload: unknown = null;
+      const text = await response.text();
+      if (text) {
+        try {
+          payload = JSON.parse(text);
+        } catch {
+          payload = null;
+        }
+      }
+
+      if (!response.ok) {
+        const message =
+          payload &&
+          typeof payload === 'object' &&
+          'message' in payload &&
+          typeof payload.message === 'string' &&
+          payload.message.trim()
+            ? payload.message.trim()
+            : `Unable to start this call (${response.status}).`;
+        throw new Error(message);
+      }
+
+      return payload as ConnectionDetails;
+    })();
+
+    connectionDetailsCache.set(cacheKey, {
+      promise: connectionDetailsPromise,
+      createdAt: Date.now(),
+    });
+    try {
+      const connectionDetails = await connectionDetailsPromise;
+      connectionDetailsCache.set(cacheKey, {
+        value: connectionDetails,
+        createdAt: Date.now(),
+      });
+      return connectionDetails;
+    } catch (error) {
+      if (connectionDetailsCache.get(cacheKey)?.promise === connectionDetailsPromise) {
+        connectionDetailsCache.delete(cacheKey);
+      }
+      throw error;
+    } finally {
+      const latest = connectionDetailsCache.get(cacheKey);
+      if (latest?.promise === connectionDetailsPromise) {
+        connectionDetailsCache.delete(cacheKey);
       }
     }
-
-    let payload: unknown = null;
-    const text = await response.text();
-    if (text) {
-      try {
-        payload = JSON.parse(text);
-      } catch {
-        payload = null;
-      }
-    }
-
-    if (!response.ok) {
-      const message =
-        payload &&
-        typeof payload === 'object' &&
-        'message' in payload &&
-        typeof payload.message === 'string' &&
-        payload.message.trim()
-          ? payload.message.trim()
-          : `Unable to start this call (${response.status}).`;
-      throw new Error(message);
-    }
-
-    return payload as ConnectionDetails;
   });
 }
 
@@ -249,7 +342,21 @@ function AppSession({
   voiceRouteNotice,
 }: AppSessionProps) {
   const [hasAutoStarted, setHasAutoStarted] = useState(false);
+  const [isStartInProgress, setIsStartInProgress] = useState(autoConnect && canStartCall);
+  const [isMicrophoneStartupPending, setIsMicrophoneStartupPending] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  const startPromiseRef = useRef<Promise<boolean> | null>(null);
+  useEffect(() => {
+    if (!isStartInProgress || startPromiseRef.current) {
+      return;
+    }
+    const timeoutId = window.setTimeout(() => {
+      if (!startPromiseRef.current) {
+        setIsStartInProgress(false);
+      }
+    }, START_LATCH_WATCHDOG_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [isStartInProgress]);
   const sessionOptions = useMemo(
     () => ({
       ...(tokenOptions ?? {}),
@@ -295,7 +402,12 @@ function AppSession({
     });
 
     try {
-      await session.room.localParticipant.setMicrophoneEnabled(true);
+      setIsMicrophoneStartupPending(true);
+      await withTimeout(
+        session.room.localParticipant.setMicrophoneEnabled(true),
+        MICROPHONE_START_TIMEOUT_MS,
+        'Viventium could not turn on the microphone before the browser responded. Check microphone permission and try again.'
+      );
     } catch (error) {
       await session.end().catch((disconnectError) => {
         console.warn(
@@ -304,6 +416,8 @@ function AppSession({
         );
       });
       throw error;
+    } finally {
+      setIsMicrophoneStartupPending(false);
     }
   }, [session, shouldDeferMicrophoneUntilConnected]);
 
@@ -319,20 +433,31 @@ function AppSession({
   });
 
   const startCall = useCallback(async () => {
-    setStartError(null);
-    try {
-      await startSession();
-      return true;
-    } catch (error) {
-      const message = normalizeStartError(error);
-      console.error('Call start failed:', error);
-      setStartError(message);
-      toastAlert({
-        title: 'Call failed to start',
-        description: <p>{message}</p>,
-      });
-      return false;
+    if (startPromiseRef.current) {
+      return startPromiseRef.current;
     }
+    setStartError(null);
+    setIsStartInProgress(true);
+    const startPromise = (async () => {
+      try {
+        await startSession();
+        return true;
+      } catch (error) {
+        const message = normalizeStartError(error);
+        console.error('Call start failed:', error);
+        setStartError(message);
+        toastAlert({
+          title: 'Call failed to start',
+          description: <p>{message}</p>,
+        });
+        return false;
+      } finally {
+        startPromiseRef.current = null;
+        setIsStartInProgress(false);
+      }
+    })();
+    startPromiseRef.current = startPromise;
+    return startPromise;
   }, [startSession]);
 
   /* === VIVENTIUM START ===
@@ -370,7 +495,19 @@ function AppSession({
   ]);
   /* === VIVENTIUM END === */
 
-  const effectiveStartHint = startError ?? callSessionState.callStateError ?? startHint;
+  const startInProgressHint = isMicrophoneStartupPending
+    ? 'Turning on your microphone...'
+    : isStartInProgress
+      ? 'Connecting Viventium to the room...'
+      : null;
+  const effectiveStartHint =
+    startError ?? callSessionState.callStateError ?? startInProgressHint ?? startHint;
+  const effectiveCanStartCall = canStartCall && !isStartInProgress;
+  const effectiveStartButtonText = isMicrophoneStartupPending
+    ? 'Turning on mic...'
+    : isStartInProgress
+      ? 'Starting call...'
+      : startButtonText;
 
   return (
     <SessionProvider session={session}>
@@ -378,9 +515,9 @@ function AppSession({
       <main className="grid h-svh grid-cols-1 place-content-center">
         <ViewController
           appConfig={appConfig}
-          canStartCall={canStartCall}
+          canStartCall={effectiveCanStartCall}
           startHint={effectiveStartHint ?? undefined}
-          startButtonText={startButtonText}
+          startButtonText={effectiveStartButtonText}
           onStartCall={() => {
             void startCall();
           }}
@@ -477,10 +614,10 @@ export function App({ appConfig }: AppProps) {
     return null;
   }
 
+  const voiceSettingsStillLoading = Boolean(expectedCallSessionId) && voiceSettings.isLoading;
   const canStartCall =
     Boolean(expectedCallSessionId || appConfig.agentName) &&
     !remoteCallBlockedReason &&
-    !(Boolean(expectedCallSessionId) && voiceSettings.isLoading) &&
     !voiceSettings.isSaving;
   const requiresMicGesture = Boolean(expectedCallSessionId);
   let startHint: string | undefined;
@@ -488,8 +625,8 @@ export function App({ appConfig }: AppProps) {
   if (remoteCallBlockedReason) {
     startHint = remoteCallBlockedReason;
     startButtonText = 'Secure setup required';
-  } else if (expectedCallSessionId && voiceSettings.isLoading) {
-    startHint = 'Loading your voice settings…';
+  } else if (voiceSettingsStillLoading) {
+    startHint = 'Tap Start chat to turn on your mic. Voice settings are still loading.';
   } else if (requiresMicGesture) {
     startHint = 'Tap Start chat to turn on your mic. Viventium joins right after.';
     if (voiceSettings.error) {

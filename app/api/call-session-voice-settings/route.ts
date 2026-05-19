@@ -14,6 +14,12 @@ const VIVENTIUM_CALL_SESSION_SECRET = process.env.VIVENTIUM_CALL_SESSION_SECRET;
 const VOICE_GATEWAY_HOST = process.env.VOICE_GATEWAY_HOST || '127.0.0.1';
 const VOICE_GATEWAY_PORT =
   process.env.VIVENTIUM_VOICE_GATEWAY_HEALTH_PORT || process.env.VOICE_GATEWAY_PORT || '8000';
+const VOICE_SETTINGS_PROXY_TIMEOUT_MS = 4500;
+
+function getVoiceSettingsProxyTimeoutMs() {
+  const parsed = Number(process.env.VIVENTIUM_VOICE_SETTINGS_PROXY_TIMEOUT_MS || '');
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : VOICE_SETTINGS_PROXY_TIMEOUT_MS;
+}
 
 function buildTargetUrl(callSessionId: string): URL {
   if (!VIVENTIUM_LIBRECHAT_ORIGIN) {
@@ -40,12 +46,36 @@ async function proxyVoiceSettingsRequest(
   method: 'GET' | 'POST',
   body?: Record<string, unknown>
 ) {
-  const response = await fetch(url.toString(), {
-    method,
-    headers: getSharedHeaders(),
-    body: method === 'POST' ? JSON.stringify(body ?? {}) : undefined,
-    cache: 'no-store',
-  });
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, getVoiceSettingsProxyTimeoutMs());
+
+  let response: Response;
+  try {
+    response = await fetch(url.toString(), {
+      method,
+      headers: getSharedHeaders(),
+      body: method === 'POST' ? JSON.stringify(body ?? {}) : undefined,
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (timedOut) {
+      return {
+        status: 504,
+        payload: {
+          message:
+            'Viventium could not load voice settings before the voice runtime responded. You can still start the call; retry voice settings after the runtime is ready.',
+        },
+      };
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   const text = await response.text();
   let payload: unknown = null;
