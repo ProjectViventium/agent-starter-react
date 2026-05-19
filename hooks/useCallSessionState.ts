@@ -142,8 +142,7 @@ export function useCallSessionState(
 
   const shouldApplyStateResponse = useCallback(
     (requestGeneration: number, blockedByModeMutation = false) =>
-      !blockedByModeMutation &&
-      requestGeneration === stateRequestGenerationRef.current,
+      !blockedByModeMutation && requestGeneration === stateRequestGenerationRef.current,
     []
   );
 
@@ -181,10 +180,7 @@ export function useCallSessionState(
       const blockedByModeMutation = modeMutationPendingRef.current;
       requestCallSessionState('GET', callSessionId, undefined, controller.signal)
         .then((next) => {
-          if (
-            cancelled ||
-            !shouldApplyStateResponse(requestGeneration, blockedByModeMutation)
-          ) {
+          if (cancelled || !shouldApplyStateResponse(requestGeneration, blockedByModeMutation)) {
             return;
           }
           applyState(next);
@@ -240,10 +236,7 @@ export function useCallSessionState(
           { touch: true },
           activeController.signal
         );
-        if (
-          cancelled ||
-          !shouldApplyStateResponse(requestGeneration, blockedByModeMutation)
-        ) {
+        if (cancelled || !shouldApplyStateResponse(requestGeneration, blockedByModeMutation)) {
           return;
         }
         applyState(next);

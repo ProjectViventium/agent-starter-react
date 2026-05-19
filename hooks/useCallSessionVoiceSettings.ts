@@ -296,8 +296,7 @@ export function useCallSessionVoiceSettings(
             return;
           }
           const shouldRetry =
-            isTransientVoiceSettingsLoadError(nextError) &&
-            attempt + 1 < INITIAL_LOAD_MAX_ATTEMPTS;
+            isTransientVoiceSettingsLoadError(nextError) && attempt + 1 < INITIAL_LOAD_MAX_ATTEMPTS;
           setError(
             formatVoiceSettingsError(nextError, 'Unable to load voice settings.', shouldRetry)
           );

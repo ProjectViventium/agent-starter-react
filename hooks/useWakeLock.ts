@@ -10,7 +10,6 @@
 // - Re-acquires wake lock on visibilitychange (lock is auto-released when page goes to background)
 // - Handles browser support gracefully (no-op on unsupported browsers)
 // VIVENTIUM END
-
 import { useCallback, useEffect, useRef } from 'react';
 
 /**
