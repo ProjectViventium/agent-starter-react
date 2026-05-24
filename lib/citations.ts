@@ -4,8 +4,12 @@
 // Details: Keep regex patterns aligned with agents-playground utils.
 const COMPOSITE_REGEX = /(?:\\ue200|ue200|\uE200).*?(?:\\ue201|ue201|\uE201)/gi;
 const STANDALONE_REGEX = /(?:\\ue202|ue202|\uE202)turn\d+[A-Za-z]+\d+/gi;
+const BARE_TURN_ID_REGEX =
+  /(?<![A-Za-z])(?:\u3010\s*)?turn\d+[A-Za-z]+\d+(?:\s*\u2020[^\u3011\s]*)?(?:\s*\u3011)?/gi;
+const ORPHAN_CITATION_TAIL_REGEX = /(?<!\S)\u2020[^\u3011\s]{0,80}\u3011(?=\s|$)/g;
+const ORPHAN_CITATION_BRACKET_REGEX = /(?<!\S)[\u3010\u3011](?!\S)/g;
 const CLEANUP_REGEX = /\\ue2(?:00|01|02|03|04|06)|ue2(?:00|01|02|03|04|06)|[\uE200-\uE206]/gi;
-const BRACKET_REGEX = /\[(\d{1,3})\](?=\s|$)/g;
+const BRACKET_REGEX = /\[(\d{1,3})\](?=\s|[.,;:!?)]|$)/g;
 const TURN_BLOCK_REGEX = /<turn\b([^>]*)>([\s\S]*?)<\/turn>/gi;
 const TURN_ROLE_REGEX = /\brole\s*=\s*(?:"|')?([a-zA-Z_]+)(?:"|')?/i;
 const TURN_TAG_REGEX = /<\/?turn\b[^>]*>/gi;
@@ -20,8 +24,12 @@ export const stripCitations = (text: string): string => {
   }
   let cleaned = text.replace(COMPOSITE_REGEX, ' ');
   cleaned = cleaned.replace(STANDALONE_REGEX, ' ');
+  cleaned = cleaned.replace(BARE_TURN_ID_REGEX, ' ');
+  cleaned = cleaned.replace(ORPHAN_CITATION_TAIL_REGEX, ' ');
+  cleaned = cleaned.replace(ORPHAN_CITATION_BRACKET_REGEX, ' ');
   cleaned = cleaned.replace(CLEANUP_REGEX, ' ');
   cleaned = cleaned.replace(BRACKET_REGEX, ' ');
+  cleaned = cleaned.replace(/\s+([.,!?;:])/g, '$1');
   cleaned = cleaned.replace(/[ \t]{2,}/g, ' ');
   return cleaned;
 };
