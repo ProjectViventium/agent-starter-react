@@ -293,7 +293,14 @@ function buildFallbackCapabilities(appConfig: AppConfig): VoiceRouteCapability[]
       available: true,
       unavailableReason: null,
       variantLabel: 'Engine',
-      variants: [{ id: 'universal-streaming', label: 'universal-streaming' }],
+      // Mirrors the voice-gateway AssemblyAI capability catalog (worker.py ASSEMBLYAI_STT_MODELS).
+      // Used only until the live agent publishes its real capabilities; ids must stay aligned with
+      // the livekit-plugins-assemblyai model set. Default/first entry is the proven u3-rt-pro.
+      variants: [
+        { id: 'u3-rt-pro', label: 'Universal-3 Pro streaming (u3-rt-pro)' },
+        { id: 'universal-streaming-english', label: 'Universal Streaming (English)' },
+        { id: 'universal-streaming-multilingual', label: 'Universal Streaming (Multilingual)' },
+      ],
     },
     {
       id: 'pywhispercpp',

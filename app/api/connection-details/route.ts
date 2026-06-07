@@ -46,6 +46,7 @@ type TokenRequest = {
 
   agentName?: string;
   agentMetadata?: string;
+  reclaimDispatch?: boolean;
   // VIVENTIUM START
   agent_name?: string;
   agent_metadata?: string;
@@ -151,6 +152,7 @@ function normalizeOptions(body: unknown): TokenRequest {
 
     agentName: options.agentName ?? options.agent_name ?? agentFromRoomConfig,
     agentMetadata: options.agentMetadata ?? options.agent_metadata ?? metadataFromRoomConfig,
+    reclaimDispatch: options.reclaimDispatch === true,
   };
 }
 
@@ -423,22 +425,39 @@ async function ensureExplicitAgentDispatch(
   }
 
   const dispatch = new AgentDispatchClient(host, API_KEY, API_SECRET);
-  let already = false;
-  if (options.forceCreate !== true) {
-    const existing = await dispatch.listDispatch(roomName);
-    // Token room-config entries can appear in ListDispatch without a real dispatch id. Only an
-    // explicit dispatch id proves the worker assignment already exists.
-    already = existing.some(
-      (entry) =>
-        entry.agentName === agentName && typeof entry.id === 'string' && entry.id.length > 0
-    );
-  }
-  if (options.forceCreate === true || !already) {
+  if (options.forceCreate === true) {
+    try {
+      const existing = await dispatch.listDispatch(roomName);
+      const existingExplicitDispatches = existing.filter(
+        (entry) =>
+          entry.agentName === agentName && typeof entry.id === 'string' && entry.id.length > 0
+      );
+      await Promise.allSettled(
+        existingExplicitDispatches.map((entry) => dispatch.deleteDispatch(entry.id, roomName))
+      );
+    } catch (error) {
+      console.warn('Unable to list existing LiveKit dispatches before forced create:', error);
+    }
     await dispatch.createDispatch(roomName, agentName, {
       metadata:
         typeof agentMetadata === 'string' && agentMetadata.length > 0 ? agentMetadata : undefined,
     });
+    return;
   }
+
+  const existing = await dispatch.listDispatch(roomName);
+  // Token room-config entries can appear in ListDispatch without a real dispatch id. Only an
+  // explicit dispatch id proves the worker assignment already exists.
+  const already = existing.some(
+    (entry) => entry.agentName === agentName && typeof entry.id === 'string' && entry.id.length > 0
+  );
+  if (already) {
+    return;
+  }
+  await dispatch.createDispatch(roomName, agentName, {
+    metadata:
+      typeof agentMetadata === 'string' && agentMetadata.length > 0 ? agentMetadata : undefined,
+  });
 }
 
 async function claimViventiumDispatch(
@@ -559,6 +578,7 @@ export async function POST(req: Request) {
 
     const agentName = options.agentName;
     const agentMetadata = options.agentMetadata;
+    const reclaimDispatch = options.reclaimDispatch === true;
     let pendingDispatchConfirmation: PendingDispatchConfirmation | null = null;
     if (agentName && agentName.trim().length > 0) {
       const callSessionId = currentCallSessionId;
@@ -574,7 +594,9 @@ export async function POST(req: Request) {
 
       if (callSessionId) {
         try {
-          const claim = await claimViventiumDispatch(callSessionId, options.room_name, agentName);
+          const claim = await claimViventiumDispatch(callSessionId, options.room_name, agentName, {
+            reclaimConfirmed: reclaimDispatch,
+          });
           const claimStatus = claim?.status ?? '';
           if (claimStatus === 'expired') {
             return NextResponse.json(

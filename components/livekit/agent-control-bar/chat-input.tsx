@@ -42,6 +42,7 @@ export function ChatInput({
     e.preventDefault();
     const trimmedMessage = message.trim();
     if (!trimmedMessage) return;
+    if (!chatOpen || !isAgentAvailable || isSending) return;
 
     try {
       setIsSending(true);
@@ -77,7 +78,7 @@ export function ChatInput({
           ref={inputRef}
           type="text"
           value={message}
-          disabled={!chatOpen}
+          disabled={!chatOpen || !isAgentAvailable || isSending}
           placeholder="Type something..."
           onChange={(e) => setMessage(e.target.value)}
           className="h-8 flex-1 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
