@@ -52,6 +52,7 @@ type AgentTokenOptions = TokenSourceFetchOptions & {
   agentName?: string;
   agentMetadata?: string;
   participantMetadata?: string;
+  reclaimDispatch?: boolean;
 };
 
 const VIVENTIUM_CALL_AGENT_CONNECT_TIMEOUT_MS = 90_000;
@@ -60,6 +61,9 @@ const CONNECTION_DETAILS_MAX_ATTEMPTS = 2;
 const CONNECTION_DETAILS_CACHE_MS = 2_000;
 const START_LATCH_WATCHDOG_MS = 1_000;
 const MICROPHONE_START_TIMEOUT_MS = 15_000;
+const DISPATCH_RECLAIM_AFTER_MS = 8_000;
+const DISPATCH_RECLAIM_RETRY_MS = 8_000;
+const DISPATCH_RECLAIM_MAX_ATTEMPTS = 3;
 
 type ConnectionDetailsCacheEntry = {
   promise?: Promise<ConnectionDetails>;
@@ -302,6 +306,24 @@ function getConnectionDetailsTokenSource(fallbackOptions?: AgentTokenOptions): T
   });
 }
 
+async function requestDispatchReclaim(options: AgentTokenOptions): Promise<void> {
+  const response = await fetch('/api/connection-details', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      ...options,
+      reclaimDispatch: true,
+    }),
+    cache: 'no-store',
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(text || `Dispatch reclaim failed (${response.status}).`);
+  }
+}
+
 type AppSessionProps = {
   tokenSource: TokenSourceConfigurable | TokenSourceFixed;
   tokenOptions: AgentTokenOptions | undefined;
@@ -346,6 +368,7 @@ function AppSession({
   const [isMicrophoneStartupPending, setIsMicrophoneStartupPending] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const startPromiseRef = useRef<Promise<boolean> | null>(null);
+  const dispatchReclaimAttemptsRef = useRef(0);
   useEffect(() => {
     if (!isStartInProgress || startPromiseRef.current) {
       return;
@@ -379,6 +402,72 @@ function AppSession({
    * causing call disconnection. The Wake Lock API keeps the screen awake.
    * === VIVENTIUM END === */
   useWakeLock(session.isConnected);
+
+  /* === VIVENTIUM START ===
+   * Feature: Cold-start dispatch self-healing.
+   * Purpose: LiveKit can accept an explicit dispatch before the voice worker is registered, then
+   * leave the room without an agent after the user publishes audio. If a call-session room is
+   * connected but still has no agent participant, reclaim and recreate the explicit dispatch.
+   * === VIVENTIUM END === */
+  useEffect(() => {
+    if (
+      !expectedCallSessionId ||
+      !session.isConnected ||
+      !tokenOptions?.roomName ||
+      !tokenOptions.agentName
+    ) {
+      dispatchReclaimAttemptsRef.current = 0;
+      return;
+    }
+
+    let cancelled = false;
+    let intervalId: number | null = null;
+    const hasAgentParticipant = () =>
+      Array.from(session.room.remoteParticipants.values()).some((participant) =>
+        Boolean((participant as { isAgent?: boolean }).isAgent)
+      );
+
+    if (hasAgentParticipant()) {
+      dispatchReclaimAttemptsRef.current = 0;
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      intervalId = window.setInterval(() => {
+        if (cancelled || hasAgentParticipant()) {
+          if (intervalId !== null) {
+            window.clearInterval(intervalId);
+          }
+          return;
+        }
+        if (dispatchReclaimAttemptsRef.current >= DISPATCH_RECLAIM_MAX_ATTEMPTS) {
+          if (intervalId !== null) {
+            window.clearInterval(intervalId);
+          }
+          return;
+        }
+        dispatchReclaimAttemptsRef.current += 1;
+        requestDispatchReclaim(tokenOptions).catch((error) => {
+          console.warn('[Viventium] Voice dispatch reclaim failed:', error);
+        });
+      }, DISPATCH_RECLAIM_RETRY_MS);
+
+      if (!cancelled && !hasAgentParticipant()) {
+        dispatchReclaimAttemptsRef.current += 1;
+        requestDispatchReclaim(tokenOptions).catch((error) => {
+          console.warn('[Viventium] Voice dispatch reclaim failed:', error);
+        });
+      }
+    }, DISPATCH_RECLAIM_AFTER_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+      }
+    };
+  }, [expectedCallSessionId, session, session.isConnected, tokenOptions]);
 
   /* === VIVENTIUM START ===
    * Feature: Explicit-dispatch call startup hardening.
