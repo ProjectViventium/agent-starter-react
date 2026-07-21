@@ -721,6 +721,12 @@ export function App({ appConfig }: AppProps) {
     if (voiceSettings.error) {
       startHint = `${startHint} ${voiceSettings.error}`;
     }
+  } else if (!canStartCall) {
+    /* === VIVENTIUM START ===
+     * Purpose: Explain the fail-closed direct-playground state to non-technical users.
+     * === VIVENTIUM END === */
+    startHint =
+      'Open Voice from a Viventium conversation. This page joins that conversation securely.';
   }
 
   if (!sessionRequested && !autoConnect) {
