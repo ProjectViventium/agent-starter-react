@@ -601,7 +601,9 @@ function AppSession({
   return (
     <SessionProvider session={session}>
       <AppSetup />
-      <main className="grid h-svh grid-cols-1 place-content-center">
+      {/* VIVENTIUM START: let content taller than the viewport grow downward instead of clipping. */}
+      <main className="grid min-h-svh grid-cols-1 place-content-center">
+        {/* VIVENTIUM END */}
         <ViewController
           appConfig={appConfig}
           canStartCall={effectiveCanStartCall}
@@ -732,7 +734,9 @@ export function App({ appConfig }: AppProps) {
   if (!sessionRequested && !autoConnect) {
     return (
       <>
-        <main className="grid h-svh grid-cols-1 place-content-center">
+        {/* VIVENTIUM START: preserve the top of the setup surface on narrow/zoomed viewports. */}
+        <main className="grid min-h-svh grid-cols-1 place-content-center">
+          {/* VIVENTIUM END */}
           <WelcomeView
             startButtonText={
               startButtonText ?? (canStartCall ? appConfig.startButtonText : 'Open from Viventium')

@@ -159,3 +159,23 @@
     }
   }
 }
+
+/* VIVENTIUM START
+ * Purpose: Honor the user's Reduce Motion preference across the modern voice surface.
+ * Details: docs/requirements_and_learnings/06_Voice_Calls.md#modern-playground
+ * VIVENTIUM END */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto !important;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-delay: 0s !important;
+    animation-duration: 0s !important;
+    animation-iteration-count: 1 !important;
+    transition-delay: 0s !important;
+    transition-duration: 0s !important;
+  }
+}
