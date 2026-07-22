@@ -49,9 +49,20 @@ function resolveAllowedDevOrigins(): string[] {
 
 const distDir = resolvePlaygroundDistDir();
 const allowedDevOrigins = resolveAllowedDevOrigins();
+const requestedBuildRef = trimEnv(process.env.VIVENTIUM_PLAYGROUND_BUILD_REF).toLowerCase();
+const compiledBuildRef = /^[0-9a-f]{40}$/.test(requestedBuildRef)
+  ? requestedBuildRef
+  : 'unversioned';
 
 const nextConfig: NextConfig = {
   outputFileTracingRoot: path.resolve(__dirname),
+  /* VIVENTIUM START
+   * Purpose: Bind the advertised playground source identity into the compiled Next artifact.
+   * A runtime environment override must not let an older build impersonate a newer component.
+   * VIVENTIUM END */
+  env: {
+    VIVENTIUM_PLAYGROUND_COMPILED_REF: compiledBuildRef,
+  },
   ...(distDir ? { distDir } : {}),
   ...(allowedDevOrigins.length > 0 ? { allowedDevOrigins } : {}),
   turbopack: {

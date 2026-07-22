@@ -12,8 +12,12 @@ import { NextResponse } from 'next/server';
 export async function GET() {
   return NextResponse.json(
     {
+      schema_version: 1,
+      product: 'viventium-playground',
       status: 'ok',
       surface: 'modern-playground',
+      variant: 'modern',
+      source_ref: process.env.VIVENTIUM_PLAYGROUND_COMPILED_REF ?? 'unversioned',
     },
     {
       headers: {
