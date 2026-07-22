@@ -17,7 +17,7 @@ export async function GET() {
       status: 'ok',
       surface: 'modern-playground',
       variant: 'modern',
-      source_ref: process.env.VIVENTIUM_PLAYGROUND_BUILD_REF ?? 'unversioned',
+      source_ref: process.env.VIVENTIUM_PLAYGROUND_COMPILED_REF ?? 'unversioned',
     },
     {
       headers: {
