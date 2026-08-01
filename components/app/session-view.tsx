@@ -62,6 +62,7 @@ export function Fade({ top = false, bottom = false, className }: FadeProps) {
 
 interface SessionViewProps {
   appConfig: AppConfig;
+  onEndCall: () => void;
   wingModeEnabled?: boolean;
   wingModePending?: boolean;
   onWingModeChange?: (enabled: boolean) => void;
@@ -78,6 +79,7 @@ interface SessionViewProps {
 
 export const SessionView = ({
   appConfig,
+  onEndCall,
   wingModeEnabled = false,
   wingModePending = false,
   onWingModeChange,
@@ -161,7 +163,7 @@ export const SessionView = ({
             appConfig={appConfig}
             controls={controls}
             isConnected={session.isConnected}
-            onDisconnect={session.end}
+            onDisconnect={onEndCall}
             onChatOpenChange={setChatOpen}
             wingModeEnabled={wingModeEnabled}
             wingModePending={wingModePending}
