@@ -41,6 +41,7 @@ interface ViewControllerProps {
   startHint?: string;
   startButtonText?: string;
   onStartCall: () => void;
+  onEndCall: () => void;
   wingModeEnabled?: boolean;
   wingModePending?: boolean;
   onWingModeChange?: (enabled: boolean) => void;
@@ -63,6 +64,7 @@ export function ViewController({
   startHint,
   startButtonText,
   onStartCall,
+  onEndCall,
   wingModeEnabled,
   wingModePending,
   onWingModeChange,
@@ -109,6 +111,7 @@ export function ViewController({
           key="session-view"
           {...VIEW_MOTION_PROPS}
           appConfig={appConfig}
+          onEndCall={onEndCall}
           wingModeEnabled={wingModeEnabled}
           wingModePending={wingModePending}
           onWingModeChange={onWingModeChange}

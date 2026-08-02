@@ -61,6 +61,7 @@ const CONNECTION_DETAILS_MAX_ATTEMPTS = 2;
 const CONNECTION_DETAILS_CACHE_MS = 2_000;
 const START_LATCH_WATCHDOG_MS = 1_000;
 const MICROPHONE_START_TIMEOUT_MS = 15_000;
+const EXPLICIT_CALL_END_TIMEOUT_MS = 6_000;
 const DISPATCH_RECLAIM_AFTER_MS = 8_000;
 const DISPATCH_RECLAIM_RETRY_MS = 8_000;
 const DISPATCH_RECLAIM_MAX_ATTEMPTS = 3;
@@ -324,6 +325,20 @@ async function requestDispatchReclaim(options: AgentTokenOptions): Promise<void>
   }
 }
 
+async function requestExplicitCallEnd(callSessionId: string): Promise<void> {
+  const response = await fetch('/api/call-session-end', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ callSessionId }),
+    cache: 'no-store',
+    keepalive: true,
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(text || `Call cancellation failed (${response.status}).`);
+  }
+}
+
 type AppSessionProps = {
   tokenSource: TokenSourceConfigurable | TokenSourceFixed;
   tokenOptions: AgentTokenOptions | undefined;
@@ -368,6 +383,7 @@ function AppSession({
   const [isMicrophoneStartupPending, setIsMicrophoneStartupPending] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const startPromiseRef = useRef<Promise<boolean> | null>(null);
+  const endPromiseRef = useRef<Promise<void> | null>(null);
   const dispatchReclaimAttemptsRef = useRef(0);
   useEffect(() => {
     if (!isStartInProgress || startPromiseRef.current) {
@@ -549,6 +565,34 @@ function AppSession({
     return startPromise;
   }, [startSession]);
 
+  const endCall = useCallback(() => {
+    if (endPromiseRef.current) {
+      return endPromiseRef.current;
+    }
+    const endPromise = (async () => {
+      try {
+        if (expectedCallSessionId) {
+          await withTimeout(
+            requestExplicitCallEnd(expectedCallSessionId),
+            EXPLICIT_CALL_END_TIMEOUT_MS,
+            'Viventium call cancellation timed out.'
+          );
+        }
+      } catch (error) {
+        console.warn('[Viventium] Explicit call cancellation failed:', error);
+      } finally {
+        try {
+          await session.end();
+        } catch (error) {
+          console.warn('[Viventium] Voice session disconnect failed:', error);
+        }
+        endPromiseRef.current = null;
+      }
+    })();
+    endPromiseRef.current = endPromise;
+    return endPromise;
+  }, [expectedCallSessionId, session]);
+
   /* === VIVENTIUM START ===
    * Feature: LibreChat deep-link auto-connect
    * Purpose: Only auto-connect once token options include the expected room + callSessionId metadata.
@@ -611,6 +655,9 @@ function AppSession({
           startButtonText={effectiveStartButtonText}
           onStartCall={() => {
             void startCall();
+          }}
+          onEndCall={() => {
+            void endCall();
           }}
           wingModeEnabled={callSessionState.wingModeEnabled}
           wingModePending={callSessionState.wingModePending}

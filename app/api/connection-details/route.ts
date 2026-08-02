@@ -23,6 +23,7 @@ const ALLOW_DIRECT_AGENT_DISPATCH =
   process.env.VIVENTIUM_ALLOW_DIRECT_AGENT_DISPATCH === '1' ||
   process.env.VIVENTIUM_ALLOW_DIRECT_AGENT_DISPATCH === 'true';
 const CALL_SESSION_VOICE_SETTINGS_TIMEOUT_MS = 5000;
+const CALL_SESSION_RECONNECT_GRACE_SECONDS = 60;
 
 function getCallSessionVoiceSettingsTimeoutMs() {
   const parsed = Number(process.env.VIVENTIUM_CALL_SESSION_VOICE_SETTINGS_TIMEOUT_MS || '');
@@ -297,6 +298,25 @@ function parseAgentMetadata(agentMetadata: string | undefined): Record<string, u
   }
 }
 
+function buildCallSessionParticipantIdentity(callSessionId: string): string {
+  const safeCallSessionId = callSessionId.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 96);
+  return `viventium-user-${safeCallSessionId}`;
+}
+
+function applyCallSessionRoomRetention(options: TokenRequest): void {
+  const existingConfig = options.room_config ?? options.roomConfig;
+  const roomConfig = existingConfig
+    ? RoomConfiguration.fromJson(existingConfig)
+    : new RoomConfiguration();
+  roomConfig.departureTimeout = Math.max(
+    roomConfig.departureTimeout || 0,
+    CALL_SESSION_RECONNECT_GRACE_SECONDS
+  );
+  const nextConfig = roomConfig.toJson() as ReturnType<RoomConfiguration['toJson']>;
+  options.room_config = nextConfig;
+  options.roomConfig = nextConfig;
+}
+
 function hasRequestedVoiceSelection(route: unknown): boolean {
   if (!route || typeof route !== 'object' || Array.isArray(route)) {
     return false;
@@ -568,10 +588,25 @@ export async function POST(req: Request) {
       }
     }
 
-    const hydratedAgentMetadata = await hydrateAgentMetadataWithVoiceSettings(
+    if (currentCallSessionId) {
+      options.participant_identity = buildCallSessionParticipantIdentity(currentCallSessionId);
+      if (!options.participant_name && !options.participantName) {
+        options.participant_name = options.participant_identity;
+      }
+      applyCallSessionRoomRetention(options);
+    }
+
+    let hydratedAgentMetadata = await hydrateAgentMetadataWithVoiceSettings(
       currentCallSessionId,
       options.agentMetadata
     );
+    if (currentCallSessionId && options.participant_identity) {
+      hydratedAgentMetadata = JSON.stringify({
+        ...(parseAgentMetadata(hydratedAgentMetadata) ?? {}),
+        callSessionId: currentCallSessionId,
+        participantIdentity: options.participant_identity,
+      });
+    }
     if (hydratedAgentMetadata) {
       options.agentMetadata = hydratedAgentMetadata;
     }
