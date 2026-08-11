@@ -124,6 +124,12 @@ AGENT_NAME=
 
 These are required for the voice agent functionality to work with your LiveKit project.
 
+## Testing
+
+Run the focused component, hook, wire-contract, and server-proxy suite with `pnpm test`.
+Vitest, jsdom, and Testing Library are development-only dependencies so the browser-call behavior can
+be regression tested without adding code to the production bundle.
+
 ## Contributing
 
 This template is open source and we welcome contributions! Please open a PR or issue through GitHub, and don't forget to join us in the [LiveKit Community Slack](https://livekit.io/join-slack)!

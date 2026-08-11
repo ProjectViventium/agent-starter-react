@@ -129,3 +129,13 @@ export function getSandboxTokenSource(appConfig: AppConfig) {
     }
   });
 }
+
+/** Signed Viventium calls always use the same-origin capability-validating BFF. */
+export function shouldUseSandboxTokenSource(
+  expectedCallSessionId: string | null,
+  sandboxEndpoint = process.env.NEXT_PUBLIC_CONN_DETAILS_ENDPOINT
+) {
+  return (
+    !expectedCallSessionId && typeof sandboxEndpoint === 'string' && sandboxEndpoint.length > 0
+  );
+}

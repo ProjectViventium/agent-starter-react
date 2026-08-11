@@ -1,13 +1,13 @@
 'use client';
 
 import { ConnectionState } from 'livekit-client';
-import { AnimatePresence, motion } from 'motion/react';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { useSessionContext } from '@livekit/components-react';
 import type { AppConfig } from '@/app-config';
 import { SessionView } from '@/components/app/session-view';
 import { WelcomeView } from '@/components/app/welcome-view';
-import type { AssistantRouteInfo } from '@/hooks/useCallSessionVoiceSettings';
-import type { VoiceRouteMetadata, VoiceRouteState } from '@/hooks/useVoiceRoute';
+import type { VoiceCallMode } from '@/hooks/useCallSessionState';
+import type { CallIssue } from '@/lib/call-start';
 
 // VIVENTIUM START
 // Purpose: Viventium agent-starter customization.
@@ -41,21 +41,18 @@ interface ViewControllerProps {
   startHint?: string;
   startButtonText?: string;
   onStartCall: () => void;
-  onEndCall: () => void;
-  wingModeEnabled?: boolean;
-  wingModePending?: boolean;
-  onWingModeChange?: (enabled: boolean) => void;
-  listenOnlyModeEnabled?: boolean;
-  listenOnlyModePending?: boolean;
-  onListenOnlyModeChange?: (enabled: boolean) => void;
-  assistantRoute?: AssistantRouteInfo | null;
-  voiceRoute: VoiceRouteMetadata;
-  requestedVoiceRoute: VoiceRouteState;
-  onRequestedVoiceRouteChange: (nextState: VoiceRouteState) => Promise<boolean> | void;
-  voiceRouteLoading?: boolean;
-  voiceRouteSaving?: boolean;
-  voiceRouteError?: string | null;
-  voiceRouteNotice?: string | null;
+  callSessionId: string | null;
+  conversationId?: string | null;
+  mode?: VoiceCallMode;
+  modePending?: boolean;
+  onModeChange?: (mode: VoiceCallMode) => void;
+  callStateError?: string | null;
+  onCallEnded?: () => void;
+  callIssue?: CallIssue | null;
+  onRetry?: () => void;
+  audioRecoveryRequired?: boolean;
+  onAudioRecovery?: () => void;
+  callEnded?: boolean;
 }
 
 export function ViewController({
@@ -64,24 +61,25 @@ export function ViewController({
   startHint,
   startButtonText,
   onStartCall,
-  onEndCall,
-  wingModeEnabled,
-  wingModePending,
-  onWingModeChange,
-  listenOnlyModeEnabled,
-  listenOnlyModePending,
-  onListenOnlyModeChange,
-  assistantRoute,
-  voiceRoute,
-  requestedVoiceRoute,
-  onRequestedVoiceRouteChange,
-  voiceRouteLoading,
-  voiceRouteSaving,
-  voiceRouteError,
-  voiceRouteNotice,
+  callSessionId,
+  conversationId,
+  mode,
+  modePending,
+  onModeChange,
+  callStateError,
+  onCallEnded,
+  callIssue,
+  onRetry,
+  audioRecoveryRequired,
+  onAudioRecovery,
+  callEnded = false,
 }: ViewControllerProps) {
   const { isConnected, connectionState } = useSessionContext();
+  const reducedMotion = useReducedMotion();
   const showSessionView = isConnected || connectionState !== ConnectionState.Disconnected;
+  const viewMotionProps = reducedMotion
+    ? { initial: false as const, animate: 'visible', exit: 'visible', transition: { duration: 0 } }
+    : VIEW_MOTION_PROPS;
 
   return (
     <AnimatePresence mode="wait">
@@ -89,41 +87,36 @@ export function ViewController({
       {!showSessionView && (
         <MotionWelcomeView
           key="welcome"
-          {...VIEW_MOTION_PROPS}
+          {...viewMotionProps}
           startButtonText={
             startButtonText ?? (canStartCall ? appConfig.startButtonText : 'Open from Viventium')
           }
           onStartCall={onStartCall}
           startDisabled={!canStartCall}
-          helperText={startHint}
-          voiceRoute={voiceRoute}
-          requestedVoiceRoute={requestedVoiceRoute}
-          onRequestedVoiceRouteChange={onRequestedVoiceRouteChange}
-          voiceRouteLoading={voiceRouteLoading}
-          voiceRouteSaving={voiceRouteSaving}
-          voiceRouteError={voiceRouteError}
-          voiceRouteNotice={voiceRouteNotice}
+          helperText={callIssue ? undefined : startHint}
+          callIssue={callIssue}
+          onRetry={onRetry}
+          callEnded={callEnded}
+          mode={mode}
         />
       )}
       {/* Session view */}
       {showSessionView && (
         <MotionSessionView
           key="session-view"
-          {...VIEW_MOTION_PROPS}
+          {...viewMotionProps}
           appConfig={appConfig}
-          onEndCall={onEndCall}
-          wingModeEnabled={wingModeEnabled}
-          wingModePending={wingModePending}
-          onWingModeChange={onWingModeChange}
-          listenOnlyModeEnabled={listenOnlyModeEnabled}
-          listenOnlyModePending={listenOnlyModePending}
-          onListenOnlyModeChange={onListenOnlyModeChange}
-          assistantRoute={assistantRoute}
-          requestedVoiceRoute={requestedVoiceRoute}
-          onRequestedVoiceRouteChange={onRequestedVoiceRouteChange}
-          voiceRouteLoading={voiceRouteLoading}
-          voiceRouteSaving={voiceRouteSaving}
-          voiceRouteError={voiceRouteError}
+          callSessionId={callSessionId}
+          conversationId={conversationId}
+          mode={mode}
+          modePending={modePending}
+          onModeChange={onModeChange}
+          callStateError={callStateError}
+          onCallEnded={onCallEnded}
+          callIssue={callIssue}
+          onIssueRetry={onRetry}
+          audioRecoveryRequired={audioRecoveryRequired}
+          onAudioRecovery={onAudioRecovery}
         />
       )}
     </AnimatePresence>

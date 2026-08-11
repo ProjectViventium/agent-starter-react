@@ -1,6 +1,8 @@
+import { CallIssueNotice } from '@/components/app/call-issue-notice';
+import { CallStatusIndicator } from '@/components/app/call-mode-control';
 import { Button } from '@/components/livekit/button';
-import { VoiceRouteControl } from '@/components/livekit/voice-route-control';
-import type { VoiceRouteMetadata, VoiceRouteState } from '@/hooks/useVoiceRoute';
+import type { VoiceCallMode } from '@/hooks/useCallSessionState';
+import type { CallIssue } from '@/lib/call-start';
 
 function WelcomeImage() {
   return (
@@ -25,13 +27,10 @@ interface WelcomeViewProps {
   onStartCall: () => void;
   startDisabled?: boolean;
   helperText?: string;
-  voiceRoute?: VoiceRouteMetadata;
-  requestedVoiceRoute?: VoiceRouteState;
-  onRequestedVoiceRouteChange?: (nextState: VoiceRouteState) => Promise<boolean> | void;
-  voiceRouteLoading?: boolean;
-  voiceRouteSaving?: boolean;
-  voiceRouteError?: string | null;
-  voiceRouteNotice?: string | null;
+  callIssue?: CallIssue | null;
+  onRetry?: () => void;
+  callEnded?: boolean;
+  mode?: VoiceCallMode;
 }
 
 export const WelcomeView = ({
@@ -39,13 +38,10 @@ export const WelcomeView = ({
   onStartCall,
   startDisabled = false,
   helperText,
-  voiceRoute,
-  requestedVoiceRoute,
-  onRequestedVoiceRouteChange,
-  voiceRouteLoading = false,
-  voiceRouteSaving = false,
-  voiceRouteError,
-  voiceRouteNotice,
+  callIssue,
+  onRetry,
+  callEnded = false,
+  mode = 'call',
   ref,
 }: React.ComponentProps<'div'> & WelcomeViewProps) => {
   return (
@@ -56,6 +52,8 @@ export const WelcomeView = ({
         <p className="text-foreground max-w-prose pt-2 text-[clamp(1.5rem,2.5vw,2.25rem)] leading-tight font-medium tracking-[-0.03em]">
           Chat live with Viventium
         </p>
+
+        {callEnded ? <CallStatusIndicator status="ended" mode={mode} className="mt-4" /> : null}
 
         <Button
           variant="primary"
@@ -71,18 +69,9 @@ export const WelcomeView = ({
           <p className="text-muted-foreground mt-4 max-w-md text-sm leading-6">{helperText}</p>
         ) : null}
 
-        {voiceRoute && requestedVoiceRoute ? (
-          <div className="mt-10 w-full max-w-4xl">
-            <VoiceRouteControl
-              inline
-              voiceRoute={voiceRoute}
-              requestedVoiceRoute={requestedVoiceRoute}
-              onRequestedVoiceRouteChange={onRequestedVoiceRouteChange}
-              savedRouteLoading={voiceRouteLoading}
-              isSaving={voiceRouteSaving}
-              error={voiceRouteError}
-              notice={voiceRouteNotice}
-            />
+        {callIssue ? (
+          <div className="mt-4 w-full max-w-md">
+            <CallIssueNotice issue={callIssue} onRetry={onRetry} />
           </div>
         ) : null}
 

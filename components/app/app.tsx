@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ConnectionState,
   TokenSource,
@@ -8,32 +8,32 @@ import {
   type TokenSourceFetchOptions,
   type TokenSourceFixed,
 } from 'livekit-client';
-import {
-  RoomAudioRenderer,
-  SessionProvider,
-  StartAudio,
-  useSession,
-} from '@livekit/components-react';
+import { RoomAudioRenderer, SessionProvider, useSession } from '@livekit/components-react';
 import type { AppConfig } from '@/app-config';
 import { ViewController } from '@/components/app/view-controller';
 import { WelcomeView } from '@/components/app/welcome-view';
-import { toastAlert } from '@/components/livekit/alert-toast';
 import { Toaster } from '@/components/livekit/toaster';
 import { useAgentErrors } from '@/hooks/useAgentErrors';
 import { useCallSessionState } from '@/hooks/useCallSessionState';
-import {
-  type AssistantRouteInfo,
-  useCallSessionVoiceSettings,
-} from '@/hooks/useCallSessionVoiceSettings';
+import { useCallSessionVoiceSettings } from '@/hooks/useCallSessionVoiceSettings';
 import { useConnectionRecovery } from '@/hooks/useConnectionRecovery';
 import { useDebugMode } from '@/hooks/useDebug';
-import {
-  type VoiceRouteMetadata,
-  type VoiceRouteState,
-  buildFallbackVoiceRoute,
-} from '@/hooks/useVoiceRoute';
+import { buildFallbackVoiceRoute } from '@/hooks/useVoiceRoute';
 import { useWakeLock } from '@/hooks/useWakeLock';
-import { getSandboxTokenSource } from '@/lib/utils';
+import {
+  callBrowserCapabilityHeaders,
+  captureCallBrowserCapability,
+} from '@/lib/call-browser-capability';
+import {
+  type CallIssue,
+  CallRequestError,
+  callIssueFromResponse,
+  classifyCallIssue,
+  readCallDeepLink,
+} from '@/lib/call-start';
+import { publishVoiceCallState } from '@/lib/call-state';
+import { enableCallMicrophone, queryMicrophonePermissionState } from '@/lib/microphone-start';
+import { getSandboxTokenSource, shouldUseSandboxTokenSource } from '@/lib/utils';
 
 const IN_DEVELOPMENT = process.env.NODE_ENV !== 'production';
 
@@ -61,7 +61,6 @@ const CONNECTION_DETAILS_MAX_ATTEMPTS = 2;
 const CONNECTION_DETAILS_CACHE_MS = 2_000;
 const START_LATCH_WATCHDOG_MS = 1_000;
 const MICROPHONE_START_TIMEOUT_MS = 15_000;
-const EXPLICIT_CALL_END_TIMEOUT_MS = 6_000;
 const DISPATCH_RECLAIM_AFTER_MS = 8_000;
 const DISPATCH_RECLAIM_RETRY_MS = 8_000;
 const DISPATCH_RECLAIM_MAX_ATTEMPTS = 3;
@@ -73,13 +72,11 @@ type ConnectionDetailsCacheEntry = {
 };
 
 const connectionDetailsCache = new Map<string, ConnectionDetailsCacheEntry>();
-
-type DeepLinkState = {
-  tokenOptions?: AgentTokenOptions;
-  autoConnect: boolean;
-  expectedRoomName: string | null;
-  expectedCallSessionId: string | null;
-};
+const canonicalConnectionDetails = new Map<
+  string,
+  Pick<ConnectionDetails, 'roomName' | 'participantIdentity'>
+>();
+const MAX_CANONICAL_CONNECTION_SESSIONS = 128;
 
 type ConnectionDetails = {
   serverUrl: string;
@@ -89,6 +86,95 @@ type ConnectionDetails = {
   participantIdentity?: string;
 };
 
+function callSessionIdFromOptions(options: AgentTokenOptions): string | null {
+  if (typeof options.agentMetadata !== 'string') {
+    return null;
+  }
+  try {
+    const metadata = JSON.parse(options.agentMetadata) as { callSessionId?: unknown };
+    return typeof metadata.callSessionId === 'string' && metadata.callSessionId.trim()
+      ? metadata.callSessionId.trim()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function validateConnectionDetails(
+  payload: unknown,
+  options: AgentTokenOptions
+): ConnectionDetails {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new CallRequestError({
+      kind: 'gateway_down',
+      message: 'The voice runtime returned invalid connection details.',
+    });
+  }
+  const value = payload as Record<string, unknown>;
+  if (
+    typeof value.serverUrl !== 'string' ||
+    !value.serverUrl.trim() ||
+    typeof value.roomName !== 'string' ||
+    !value.roomName.trim() ||
+    typeof value.participantToken !== 'string' ||
+    !value.participantToken.trim()
+  ) {
+    throw new CallRequestError({
+      kind: 'gateway_down',
+      message: 'The voice runtime returned incomplete connection details.',
+    });
+  }
+  const details: ConnectionDetails = {
+    serverUrl: value.serverUrl,
+    roomName: value.roomName,
+    participantToken: value.participantToken,
+    ...(typeof value.participantName === 'string'
+      ? { participantName: value.participantName }
+      : {}),
+    ...(typeof value.participantIdentity === 'string'
+      ? { participantIdentity: value.participantIdentity }
+      : {}),
+  };
+  const callSessionId = callSessionIdFromOptions(options);
+  if (!callSessionId) {
+    return details;
+  }
+  if (options.roomName && options.roomName !== details.roomName) {
+    throw new CallRequestError({
+      kind: 'auth_expired',
+      message: 'The signed call session does not match the connected room.',
+    });
+  }
+  if (!details.participantIdentity) {
+    throw new CallRequestError({
+      kind: 'auth_expired',
+      message: 'The signed call session returned no stable owner identity.',
+    });
+  }
+  const prior = canonicalConnectionDetails.get(callSessionId);
+  if (
+    prior &&
+    (prior.roomName !== details.roomName ||
+      prior.participantIdentity !== details.participantIdentity)
+  ) {
+    throw new CallRequestError({
+      kind: 'auth_expired',
+      message: 'The signed call identity changed during reconnect.',
+    });
+  }
+  canonicalConnectionDetails.delete(callSessionId);
+  canonicalConnectionDetails.set(callSessionId, {
+    roomName: details.roomName,
+    participantIdentity: details.participantIdentity,
+  });
+  while (canonicalConnectionDetails.size > MAX_CANONICAL_CONNECTION_SESSIONS) {
+    const oldest = canonicalConnectionDetails.keys().next();
+    if (oldest.done) break;
+    canonicalConnectionDetails.delete(oldest.value);
+  }
+  return details;
+}
+
 function isLoopbackHost(hostname: string | null | undefined): boolean {
   const normalized = (hostname ?? '')
     .trim()
@@ -97,90 +183,26 @@ function isLoopbackHost(hostname: string | null | undefined): boolean {
   return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1';
 }
 
-function readDeepLinkState(): DeepLinkState {
-  if (typeof window === 'undefined') {
-    return {
-      autoConnect: false,
-      expectedRoomName: null,
-      expectedCallSessionId: null,
-    };
-  }
-  const params = new URLSearchParams(window.location.search);
-  const roomName = params.get('roomName');
-  const agentName = params.get('agentName');
-  const callSessionId = params.get('callSessionId');
-  const shouldAutoConnect = params.get('autoConnect') === '1';
-
-  const tokenOptions: AgentTokenOptions = {};
-  if (roomName) {
-    tokenOptions.roomName = roomName;
-  }
-  if (agentName) {
-    tokenOptions.agentName = agentName;
-  }
-  if (callSessionId) {
-    tokenOptions.agentMetadata = JSON.stringify({ callSessionId });
-    tokenOptions.participantMetadata = JSON.stringify({ callSessionId });
-  }
-
-  return {
-    tokenOptions: Object.keys(tokenOptions).length > 0 ? tokenOptions : undefined,
-    // Publisher-dispatch Viventium calls need a live microphone track before the agent can join.
-    // Browsers generally require a user gesture before microphone publication, so deep links should
-    // land on the pre-connect screen instead of auto-starting into an immediate timeout.
-    autoConnect: shouldAutoConnect && !callSessionId,
-    expectedRoomName: roomName ?? null,
-    expectedCallSessionId: callSessionId ?? null,
-  };
+function buildCallSessionMetadata(callSessionId: string) {
+  return JSON.stringify({ callSessionId });
 }
 
-function buildCallSessionMetadata(callSessionId: string, requestedVoiceRoute: VoiceRouteState) {
-  return JSON.stringify({
-    callSessionId,
-    requestedVoiceRoute,
-  });
-}
-
-function isLikelyFetchNetworkError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-  const message = error.message.trim().toLowerCase();
-  return (
-    message === 'failed to fetch' ||
-    message === 'fetch failed' ||
-    message === 'load failed' ||
-    message.includes('networkerror')
-  );
-}
-
-function normalizeStartError(error: unknown): string {
-  if (isLikelyFetchNetworkError(error)) {
-    return 'Viventium could not reach the voice runtime. Check the connection and retry.';
-  }
-  if (error instanceof Error) {
-    const message = error.message.trim();
-    const normalizedName = error.name.trim().toLowerCase();
-    const normalizedMessage = message.toLowerCase();
-    if (
-      normalizedName === 'notallowederror' ||
-      normalizedMessage.includes('permission denied') ||
-      normalizedMessage.includes('permission was denied')
-    ) {
-      return 'Microphone permission was denied. Allow microphone access for this site and start the call again.';
-    }
-    if (
-      normalizedName === 'notfounderror' ||
-      normalizedMessage.includes('requested device not found') ||
-      normalizedMessage.includes('no microphone')
-    ) {
-      return 'Viventium could not find a microphone. Connect or enable a microphone and start the call again.';
-    }
-    if (message) {
-      return message;
+function parseCallSessionIdFromTokenOptions(options?: AgentTokenOptions): string | null {
+  for (const candidate of [options?.agentMetadata, options?.participantMetadata]) {
+    if (typeof candidate !== 'string' || !candidate.trim()) continue;
+    try {
+      const parsed = JSON.parse(candidate) as { callSessionId?: unknown };
+      if (
+        typeof parsed.callSessionId === 'string' &&
+        /^[A-Za-z0-9._:-]{1,160}$/.test(parsed.callSessionId)
+      ) {
+        return parsed.callSessionId;
+      }
+    } catch {
+      // Structured metadata only; malformed values carry no call authority.
     }
   }
-  return 'Unable to start this call right now. Start a fresh call from Viventium or use /call in Telegram.';
+  return null;
 }
 
 async function wait(ms: number): Promise<void> {
@@ -200,21 +222,6 @@ function stableCacheStringify(value: unknown): string {
       .join(',')}}`;
   }
   return JSON.stringify(value) ?? 'undefined';
-}
-
-async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-  let timeoutId: number | null = null;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutId = window.setTimeout(() => reject(new Error(message)), ms);
-  });
-
-  try {
-    return await Promise.race([promise, timeoutPromise]);
-  } finally {
-    if (timeoutId !== null) {
-      window.clearTimeout(timeoutId);
-    }
-  }
 }
 
 function getConnectionDetailsTokenSource(fallbackOptions?: AgentTokenOptions): TokenSourceFixed {
@@ -242,6 +249,9 @@ function getConnectionDetailsTokenSource(fallbackOptions?: AgentTokenOptions): T
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
+              ...callBrowserCapabilityHeaders(
+                parseCallSessionIdFromTokenOptions(mergedOptions) ?? ''
+              ),
             },
             body: JSON.stringify(mergedOptions),
             cache: 'no-store',
@@ -249,9 +259,12 @@ function getConnectionDetailsTokenSource(fallbackOptions?: AgentTokenOptions): T
           break;
         } catch (error) {
           const shouldRetry =
-            isLikelyFetchNetworkError(error) && attempt + 1 < CONNECTION_DETAILS_MAX_ATTEMPTS;
+            error instanceof TypeError && attempt + 1 < CONNECTION_DETAILS_MAX_ATTEMPTS;
           if (!shouldRetry) {
-            throw new Error(normalizeStartError(error));
+            throw new CallRequestError({
+              kind: 'gateway_down',
+              message: 'Viventium could not reach the voice runtime.',
+            });
           }
           await wait(CONNECTION_DETAILS_RETRY_MS);
         }
@@ -268,18 +281,16 @@ function getConnectionDetailsTokenSource(fallbackOptions?: AgentTokenOptions): T
       }
 
       if (!response.ok) {
-        const message =
+        const retryable = Boolean(
           payload &&
-          typeof payload === 'object' &&
-          'message' in payload &&
-          typeof payload.message === 'string' &&
-          payload.message.trim()
-            ? payload.message.trim()
-            : `Unable to start this call (${response.status}).`;
-        throw new Error(message);
+            typeof payload === 'object' &&
+            'retryable' in payload &&
+            payload.retryable === true
+        );
+        throw new CallRequestError(callIssueFromResponse(response.status, payload), retryable);
       }
 
-      return payload as ConnectionDetails;
+      return validateConnectionDetails(payload, mergedOptions);
     })();
 
     connectionDetailsCache.set(cacheKey, {
@@ -312,6 +323,7 @@ async function requestDispatchReclaim(options: AgentTokenOptions): Promise<void>
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      ...callBrowserCapabilityHeaders(parseCallSessionIdFromTokenOptions(options) ?? ''),
     },
     body: JSON.stringify({
       ...options,
@@ -325,38 +337,18 @@ async function requestDispatchReclaim(options: AgentTokenOptions): Promise<void>
   }
 }
 
-async function requestExplicitCallEnd(callSessionId: string): Promise<void> {
-  const response = await fetch('/api/call-session-end', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ callSessionId }),
-    cache: 'no-store',
-    keepalive: true,
-  });
-  if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    throw new Error(text || `Call cancellation failed (${response.status}).`);
-  }
-}
-
 type AppSessionProps = {
   tokenSource: TokenSourceConfigurable | TokenSourceFixed;
   tokenOptions: AgentTokenOptions | undefined;
   autoConnect: boolean;
   expectedRoomName: string | null;
   expectedCallSessionId: string | null;
+  expectedConversationId: string | null;
   canStartCall: boolean;
   startHint?: string;
   startButtonText?: string;
+  preflightIssue?: CallIssue | null;
   appConfig: AppConfig;
-  voiceRoute: VoiceRouteMetadata;
-  requestedVoiceRoute: VoiceRouteState;
-  assistantRoute?: AssistantRouteInfo | null;
-  onRequestedVoiceRouteChange: (nextState: VoiceRouteState) => Promise<boolean>;
-  voiceRouteLoading?: boolean;
-  voiceRouteSaving?: boolean;
-  voiceRouteError?: string | null;
-  voiceRouteNotice?: string | null;
 };
 
 function AppSession({
@@ -365,26 +357,22 @@ function AppSession({
   autoConnect,
   expectedRoomName,
   expectedCallSessionId,
+  expectedConversationId,
   canStartCall,
   startHint,
   startButtonText,
+  preflightIssue,
   appConfig,
-  voiceRoute,
-  requestedVoiceRoute,
-  assistantRoute,
-  onRequestedVoiceRouteChange,
-  voiceRouteLoading,
-  voiceRouteSaving,
-  voiceRouteError,
-  voiceRouteNotice,
 }: AppSessionProps) {
   const [hasAutoStarted, setHasAutoStarted] = useState(false);
   const [isStartInProgress, setIsStartInProgress] = useState(autoConnect && canStartCall);
   const [isMicrophoneStartupPending, setIsMicrophoneStartupPending] = useState(false);
-  const [startError, setStartError] = useState<string | null>(null);
+  const [audioRecoveryRequired, setAudioRecoveryRequired] = useState(false);
+  const [startError, setStartError] = useState<CallIssue | null>(null);
+  const [hasEnded, setHasEnded] = useState(false);
   const startPromiseRef = useRef<Promise<boolean> | null>(null);
-  const endPromiseRef = useRef<Promise<void> | null>(null);
   const dispatchReclaimAttemptsRef = useRef(0);
+  const publishedModeStateRef = useRef<{ callSessionId: string; revision: number } | null>(null);
   useEffect(() => {
     if (!isStartInProgress || startPromiseRef.current) {
       return;
@@ -409,8 +397,59 @@ function AppSession({
   const callSessionState = useCallSessionState(
     expectedCallSessionId,
     Boolean(expectedCallSessionId) &&
+      !hasEnded &&
       (session.isConnected || session.connectionState === ConnectionState.Connecting)
   );
+
+  useEffect(() => {
+    const transition = callSessionState.lastModeTransition;
+    if (
+      !transition ||
+      !expectedCallSessionId ||
+      transition.callSessionId !== expectedCallSessionId ||
+      !session.isConnected
+    ) {
+      return;
+    }
+    const published = publishedModeStateRef.current;
+    if (
+      published?.callSessionId === transition.callSessionId &&
+      published.revision >= transition.revision
+    ) {
+      return;
+    }
+    let cancelled = false;
+    let retryTimer: number | null = null;
+    const publish = (attempt: number) => {
+      void publishVoiceCallState(session.room.localParticipant, transition)
+        .then(() => {
+          if (!cancelled) {
+            publishedModeStateRef.current = {
+              callSessionId: transition.callSessionId,
+              revision: transition.revision,
+            };
+          }
+        })
+        .catch((error) => {
+          if (cancelled) return;
+          if (attempt < 2) {
+            retryTimer = window.setTimeout(() => publish(attempt + 1), 250 * (attempt + 1));
+          } else {
+            console.warn('[Viventium] Authoritative call mode delivery failed:', error);
+          }
+        });
+    };
+    publish(0);
+    return () => {
+      cancelled = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+    };
+  }, [
+    callSessionState.lastModeTransition,
+    expectedCallSessionId,
+    session.isConnected,
+    session.room,
+  ]);
 
   /* === VIVENTIUM START ===
    * Feature: Prevent screen sleep during active voice calls.
@@ -492,9 +531,20 @@ function AppSession({
    * publishes the microphone track.
    * === VIVENTIUM END === */
   const shouldDeferMicrophoneUntilConnected = Boolean(expectedCallSessionId || appConfig.agentName);
+  const startRoomAudio = useCallback(async () => {
+    try {
+      await session.room.startAudio();
+      setAudioRecoveryRequired(false);
+      return true;
+    } catch {
+      setAudioRecoveryRequired(true);
+      return false;
+    }
+  }, [session.room]);
   const startSession = useCallback(async () => {
     if (!shouldDeferMicrophoneUntilConnected) {
       await session.start();
+      await startRoomAudio();
       return;
     }
 
@@ -508,11 +558,14 @@ function AppSession({
 
     try {
       setIsMicrophoneStartupPending(true);
-      await withTimeout(
-        session.room.localParticipant.setMicrophoneEnabled(true),
-        MICROPHONE_START_TIMEOUT_MS,
-        'Viventium could not turn on the microphone before the browser responded. Check microphone permission and try again.'
-      );
+      const permissionState = await queryMicrophonePermissionState();
+      await enableCallMicrophone({
+        permissionState,
+        enable: () => session.room.localParticipant.setMicrophoneEnabled(true),
+        disable: () => session.room.localParticipant.setMicrophoneEnabled(false),
+        grantedTimeoutMs: MICROPHONE_START_TIMEOUT_MS,
+      });
+      await startRoomAudio();
     } catch (error) {
       await session.end().catch((disconnectError) => {
         console.warn(
@@ -524,7 +577,7 @@ function AppSession({
     } finally {
       setIsMicrophoneStartupPending(false);
     }
-  }, [session, shouldDeferMicrophoneUntilConnected]);
+  }, [session, shouldDeferMicrophoneUntilConnected, startRoomAudio]);
 
   /* === VIVENTIUM START ===
    * Feature: Auto-reconnect after screen sleep / background return.
@@ -548,13 +601,9 @@ function AppSession({
         await startSession();
         return true;
       } catch (error) {
-        const message = normalizeStartError(error);
+        const issue = classifyCallIssue(error);
         console.error('Call start failed:', error);
-        setStartError(message);
-        toastAlert({
-          title: 'Call failed to start',
-          description: <p>{message}</p>,
-        });
+        setStartError(issue);
         return false;
       } finally {
         startPromiseRef.current = null;
@@ -564,34 +613,6 @@ function AppSession({
     startPromiseRef.current = startPromise;
     return startPromise;
   }, [startSession]);
-
-  const endCall = useCallback(() => {
-    if (endPromiseRef.current) {
-      return endPromiseRef.current;
-    }
-    const endPromise = (async () => {
-      try {
-        if (expectedCallSessionId) {
-          await withTimeout(
-            requestExplicitCallEnd(expectedCallSessionId),
-            EXPLICIT_CALL_END_TIMEOUT_MS,
-            'Viventium call cancellation timed out.'
-          );
-        }
-      } catch (error) {
-        console.warn('[Viventium] Explicit call cancellation failed:', error);
-      } finally {
-        try {
-          await session.end();
-        } catch (error) {
-          console.warn('[Viventium] Voice session disconnect failed:', error);
-        }
-        endPromiseRef.current = null;
-      }
-    })();
-    endPromiseRef.current = endPromise;
-    return endPromise;
-  }, [expectedCallSessionId, session]);
 
   /* === VIVENTIUM START ===
    * Feature: LibreChat deep-link auto-connect
@@ -633,21 +654,22 @@ function AppSession({
     : isStartInProgress
       ? 'Connecting Viventium to the room...'
       : null;
-  const effectiveStartHint =
-    startError ?? callSessionState.callStateError ?? startInProgressHint ?? startHint;
-  const effectiveCanStartCall = canStartCall && !isStartInProgress;
-  const effectiveStartButtonText = isMicrophoneStartupPending
-    ? 'Turning on mic...'
-    : isStartInProgress
-      ? 'Starting call...'
-      : startButtonText;
+  const effectiveStartHint = hasEnded
+    ? 'Call ended. Any active work is continuing in your linked Viventium chat.'
+    : (callSessionState.callStateError ?? startInProgressHint ?? startHint);
+  const effectiveCanStartCall = canStartCall && !isStartInProgress && !hasEnded;
+  const effectiveStartButtonText = hasEnded
+    ? 'Call ended'
+    : isMicrophoneStartupPending
+      ? 'Turning on mic...'
+      : isStartInProgress
+        ? 'Starting call...'
+        : startButtonText;
 
   return (
     <SessionProvider session={session}>
       <AppSetup />
-      {/* VIVENTIUM START: let content taller than the viewport grow downward instead of clipping. */}
       <main className="grid min-h-svh grid-cols-1 place-content-center">
-        {/* VIVENTIUM END */}
         <ViewController
           appConfig={appConfig}
           canStartCall={effectiveCanStartCall}
@@ -656,30 +678,20 @@ function AppSession({
           onStartCall={() => {
             void startCall();
           }}
-          onEndCall={() => {
-            void endCall();
-          }}
-          wingModeEnabled={callSessionState.wingModeEnabled}
-          wingModePending={callSessionState.wingModePending}
-          onWingModeChange={(enabled) => {
-            void callSessionState.setWingModeEnabled(enabled);
-          }}
-          listenOnlyModeEnabled={callSessionState.listenOnlyModeEnabled}
-          listenOnlyModePending={callSessionState.listenOnlyModePending}
-          onListenOnlyModeChange={(enabled) => {
-            void callSessionState.setListenOnlyModeEnabled(enabled);
-          }}
-          assistantRoute={assistantRoute}
-          voiceRoute={voiceRoute}
-          requestedVoiceRoute={requestedVoiceRoute}
-          onRequestedVoiceRouteChange={onRequestedVoiceRouteChange}
-          voiceRouteLoading={voiceRouteLoading}
-          voiceRouteSaving={voiceRouteSaving}
-          voiceRouteError={voiceRouteError}
-          voiceRouteNotice={voiceRouteNotice}
+          callSessionId={expectedCallSessionId}
+          conversationId={expectedConversationId}
+          mode={callSessionState.mode}
+          modePending={callSessionState.modePending}
+          onModeChange={(mode) => void callSessionState.setMode(mode)}
+          callStateError={callSessionState.callStateError}
+          onCallEnded={() => setHasEnded(true)}
+          callIssue={startError ?? callSessionState.callStateIssue ?? preflightIssue}
+          onRetry={() => void startCall()}
+          audioRecoveryRequired={audioRecoveryRequired}
+          onAudioRecovery={() => void startRoomAudio()}
+          callEnded={hasEnded}
         />
       </main>
-      <StartAudio label="Start Audio" />
       <RoomAudioRenderer />
       <Toaster />
     </SessionProvider>
@@ -696,32 +708,36 @@ export function App({ appConfig }: AppProps) {
   const [autoConnect, setAutoConnect] = useState(false);
   const [expectedRoomName, setExpectedRoomName] = useState<string | null>(null);
   const [expectedCallSessionId, setExpectedCallSessionId] = useState<string | null>(null);
+  const [expectedConversationId, setExpectedConversationId] = useState<string | null>(null);
   const [remoteCallBlockedReason, setRemoteCallBlockedReason] = useState<string | null>(null);
   const fallbackVoiceRoute = useMemo(() => buildFallbackVoiceRoute(appConfig), [appConfig]);
   const voiceSettings = useCallSessionVoiceSettings(expectedCallSessionId, fallbackVoiceRoute);
-  const selectionVoiceRoute = voiceSettings.selectionVoiceRoute ?? fallbackVoiceRoute;
   const effectiveTokenOptions = useMemo(() => {
     if (!expectedCallSessionId) {
       return tokenOptions;
     }
 
-    const metadata = buildCallSessionMetadata(
-      expectedCallSessionId,
-      voiceSettings.requestedVoiceRoute
-    );
+    const metadata = buildCallSessionMetadata(expectedCallSessionId);
     return {
       ...(tokenOptions ?? {}),
       agentMetadata: metadata,
       participantMetadata: metadata,
     };
-  }, [expectedCallSessionId, tokenOptions, voiceSettings.requestedVoiceRoute]);
+  }, [expectedCallSessionId, tokenOptions]);
   const tokenSource = useMemo(() => {
-    return typeof process.env.NEXT_PUBLIC_CONN_DETAILS_ENDPOINT === 'string'
+    return shouldUseSandboxTokenSource(expectedCallSessionId)
       ? getSandboxTokenSource(appConfig)
       : getConnectionDetailsTokenSource(effectiveTokenOptions);
-  }, [appConfig, effectiveTokenOptions]);
+  }, [appConfig, effectiveTokenOptions, expectedCallSessionId]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    captureCallBrowserCapability({
+      search: window.location.search,
+      hash: window.location.hash,
+      pathname: window.location.pathname,
+      storage: window.sessionStorage,
+      replaceUrl: (url) => window.history.replaceState(window.history.state, '', url),
+    });
     setClientReady(true);
   }, []);
 
@@ -736,12 +752,13 @@ export function App({ appConfig }: AppProps) {
       setDeepLinkReady(true);
       return;
     }
-    const deepLink = readDeepLinkState();
+    const deepLink = readCallDeepLink(window.location.search);
     if (deepLink.tokenOptions) {
       setTokenOptions((prev) => ({ ...(prev ?? {}), ...deepLink.tokenOptions }));
     }
     setExpectedRoomName(deepLink.expectedRoomName);
     setExpectedCallSessionId(deepLink.expectedCallSessionId);
+    setExpectedConversationId(deepLink.expectedConversationId);
     if (deepLink.autoConnect) {
       setAutoConnect(true);
     }
@@ -753,37 +770,38 @@ export function App({ appConfig }: AppProps) {
   }
 
   const voiceSettingsStillLoading = Boolean(expectedCallSessionId) && voiceSettings.isLoading;
+  const hasAuthoritativeRoute = Boolean(
+    !expectedCallSessionId ||
+      (voiceSettings.configuredVoiceRoute.stt.provider &&
+        voiceSettings.configuredVoiceRoute.tts.provider)
+  );
   const canStartCall =
     Boolean(expectedCallSessionId || appConfig.agentName) &&
     !remoteCallBlockedReason &&
-    !voiceSettings.isSaving;
-  const requiresMicGesture = Boolean(expectedCallSessionId);
+    !voiceSettings.isSaving &&
+    !voiceSettingsStillLoading &&
+    !voiceSettings.error &&
+    hasAuthoritativeRoute;
   let startHint: string | undefined;
   let startButtonText: string | undefined;
+  let preflightIssue: CallIssue | null = null;
   if (remoteCallBlockedReason) {
     startHint = remoteCallBlockedReason;
     startButtonText = 'Secure setup required';
   } else if (voiceSettingsStillLoading) {
-    startHint = 'Tap Start chat to turn on your mic. Voice settings are still loading.';
-  } else if (requiresMicGesture) {
-    startHint = 'Tap Start chat to turn on your mic. Viventium joins right after.';
-    if (voiceSettings.error) {
-      startHint = `${startHint} ${voiceSettings.error}`;
-    }
-  } else if (!canStartCall) {
-    /* === VIVENTIUM START ===
-     * Purpose: Explain the fail-closed direct-playground state to non-technical users.
-     * === VIVENTIUM END === */
-    startHint =
-      'Open Voice from a Viventium conversation. This page joins that conversation securely.';
+    startHint = 'Preparing your configured voice route...';
+  } else if (voiceSettings.error) {
+    startHint = voiceSettings.error;
+    preflightIssue = voiceSettings.issue;
+  } else if (!hasAuthoritativeRoute) {
+    startHint = 'Voice is not configured. Viventium did not switch providers automatically.';
+    preflightIssue = { kind: 'no_route', message: startHint };
   }
 
   if (!sessionRequested && !autoConnect) {
     return (
       <>
-        {/* VIVENTIUM START: preserve the top of the setup surface on narrow/zoomed viewports. */}
         <main className="grid min-h-svh grid-cols-1 place-content-center">
-          {/* VIVENTIUM END */}
           <WelcomeView
             startButtonText={
               startButtonText ?? (canStartCall ? appConfig.startButtonText : 'Open from Viventium')
@@ -792,14 +810,8 @@ export function App({ appConfig }: AppProps) {
               setSessionRequested(true);
             }}
             startDisabled={!canStartCall}
-            helperText={startHint}
-            voiceRoute={selectionVoiceRoute}
-            requestedVoiceRoute={voiceSettings.requestedVoiceRoute}
-            onRequestedVoiceRouteChange={voiceSettings.setRequestedVoiceRoute}
-            voiceRouteLoading={voiceSettings.isLoading}
-            voiceRouteSaving={voiceSettings.isSaving}
-            voiceRouteError={voiceSettings.error}
-            voiceRouteNotice={voiceSettings.notice}
+            helperText={preflightIssue ? undefined : startHint}
+            callIssue={preflightIssue}
           />
         </main>
         <Toaster />
@@ -814,18 +826,12 @@ export function App({ appConfig }: AppProps) {
       autoConnect={autoConnect || sessionRequested}
       expectedRoomName={expectedRoomName}
       expectedCallSessionId={expectedCallSessionId}
+      expectedConversationId={expectedConversationId}
       canStartCall={canStartCall}
       startHint={startHint}
       startButtonText={startButtonText}
+      preflightIssue={preflightIssue}
       appConfig={appConfig}
-      voiceRoute={selectionVoiceRoute}
-      requestedVoiceRoute={voiceSettings.requestedVoiceRoute}
-      assistantRoute={voiceSettings.assistantRoute}
-      onRequestedVoiceRouteChange={voiceSettings.setRequestedVoiceRoute}
-      voiceRouteLoading={voiceSettings.isLoading}
-      voiceRouteSaving={voiceSettings.isSaving}
-      voiceRouteError={voiceSettings.error}
-      voiceRouteNotice={voiceSettings.notice}
     />
   );
 }

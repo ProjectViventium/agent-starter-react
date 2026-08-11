@@ -17,6 +17,13 @@ const eslintConfig = [
     'prettier',
     'plugin:prettier/recommended'
   ),
+  {
+    files: ['**/*.test.{ts,tsx}'],
+    rules: {
+      // Testing Library's conditional exports are valid at runtime but opaque to import/named.
+      'import/named': 'off',
+    },
+  },
 ];
 
 export default eslintConfig;

@@ -67,6 +67,7 @@ export default async function RootLayout({ children }: RootLayoutProps) {
          * VIVENTIUM END */}
         <title>{pageTitle}</title>
         <meta name="description" content={pageDescription} />
+        <meta name="referrer" content="no-referrer" />
         <meta property="og:title" content={pageTitle} />
         <meta property="og:description" content={pageDescription} />
         <meta property="og:type" content="website" />
