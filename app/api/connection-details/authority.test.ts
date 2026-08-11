@@ -258,6 +258,12 @@ describe('connection details call-session authority', () => {
           })
         )
         .mockResolvedValueOnce(
+          new Response(JSON.stringify({ status: 'claimed', isWorkerClaimed: true }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )
+        .mockResolvedValueOnce(
           new Response(JSON.stringify({ status: 'created' }), {
             status: 200,
             headers: { 'Content-Type': 'application/json' },
@@ -380,6 +386,12 @@ describe('connection details call-session authority', () => {
           })
         )
         .mockResolvedValueOnce(
+          new Response(JSON.stringify({ status: 'claimed', isWorkerClaimed: true }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )
+        .mockResolvedValueOnce(
           new Response(JSON.stringify({ status: 'created' }), {
             status: 200,
             headers: { 'Content-Type': 'application/json' },
@@ -428,29 +440,32 @@ describe('connection details call-session authority', () => {
       agentName: canonical.gatewayAgentName,
       state: { jobs: [] },
     });
-    vi.stubGlobal(
-      'fetch',
-      vi
-        .fn()
-        .mockResolvedValueOnce(
-          new Response(JSON.stringify(canonical), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' },
-          })
-        )
-        .mockResolvedValueOnce(
-          new Response(JSON.stringify({ status: 'claimed', claimId: 'claim-unassigned' }), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' },
-          })
-        )
-        .mockResolvedValueOnce(
-          new Response(JSON.stringify({ status: 'released' }), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' },
-          })
-        )
-    );
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/dispatch/status?claimId=claim-unassigned')) {
+        return new Response(JSON.stringify({ status: 'waiting', isWorkerClaimed: false }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.endsWith('/dispatch/confirm')) {
+        return new Response(JSON.stringify({ status: 'released' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.endsWith('/dispatch/claim')) {
+        return new Response(JSON.stringify({ status: 'claimed', claimId: 'claim-unassigned' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify(canonical), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
     const { POST } = await import('@/app/api/connection-details/route');
 
     const response = await POST(
@@ -472,7 +487,11 @@ describe('connection details call-session authority', () => {
       code: 'gateway_down',
       retryable: true,
     });
-    expect(liveKitMocks.getDispatch).toHaveBeenCalled();
+    expect(liveKitMocks.getDispatch).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/dispatch/status?claimId=claim-unassigned'),
+      expect.objectContaining({ method: 'GET' })
+    );
     expect(
       JSON.parse(String(liveKitMocks.createDispatch.mock.calls[0]?.[2]?.metadata)).dispatchClaimId
     ).toBe('claim-unassigned');
@@ -510,6 +529,12 @@ describe('connection details call-session authority', () => {
       )
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ status: 'claimed', claimId: 'claim-initial' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'claimed', isWorkerClaimed: true }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         })
@@ -585,6 +610,12 @@ describe('connection details call-session authority', () => {
       )
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ status: 'claimed', claimId: 'claim-replacement' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'claimed', isWorkerClaimed: true }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         })
@@ -692,7 +723,7 @@ describe('connection details call-session authority', () => {
     ).toBe('claim-stalled');
   });
 
-  it('mints the owner token once LiveKit assigns a pending room job to the exact worker', async () => {
+  it('mints the owner token only after the exact backend claim reports a worker', async () => {
     process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'https://librechat.example.com';
     process.env.VIVENTIUM_CALL_SESSION_SECRET = 'server-secret';
     process.env.VIVENTIUM_CALL_DISPATCH_ASSIGN_TIMEOUT_MS = '250';
@@ -702,15 +733,7 @@ describe('connection details call-session authority', () => {
     const assignedDispatch = {
       id: 'dispatch-assigned',
       agentName: canonical.gatewayAgentName,
-      state: {
-        jobs: [
-          {
-            id: 'job-assigned',
-            dispatchId: 'dispatch-assigned',
-            state: { status: 0, workerId: 'worker-assigned' },
-          },
-        ],
-      },
+      state: { jobs: [] },
     };
     liveKitMocks.createDispatch.mockResolvedValue(assignedDispatch);
     liveKitMocks.getDispatch.mockResolvedValue(assignedDispatch);
@@ -726,6 +749,12 @@ describe('connection details call-session authority', () => {
         )
         .mockResolvedValueOnce(
           new Response(JSON.stringify({ status: 'claimed', claimId: 'claim-assigned' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ status: 'claimed', isWorkerClaimed: true }), {
             status: 200,
             headers: { 'Content-Type': 'application/json' },
           })
@@ -755,6 +784,10 @@ describe('connection details call-session authority', () => {
 
     expect(response.status).toBe(200);
     expect(liveKitMocks.toJwt).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/dispatch/status?claimId=claim-assigned'),
+      expect.objectContaining({ method: 'GET' })
+    );
   });
 
   it('rejects a dispatch whose only LiveKit job is already terminal', async () => {

@@ -343,6 +343,7 @@ async function performExplicitAgentDispatch(
     forceCreate?: boolean;
     createIfMissing?: boolean;
     cleanupExistingDispatches?: boolean;
+    requireAssignedWorker?: boolean;
   } = {},
   deadlineMs = Date.now() + DISPATCH_ASSIGNMENT_TIMEOUT_MS,
   attempt?: ExplicitDispatchAttempt
@@ -418,6 +419,9 @@ async function performExplicitAgentDispatch(
   if (attempt?.cancelled && attempt.createdDispatchId === dispatchId) {
     await dispatch.deleteDispatch(dispatchId, roomName).catch(() => undefined);
     throw new Error('LiveKit dispatch attempt was superseded');
+  }
+  if (options.requireAssignedWorker === false) {
+    return;
   }
   // LiveKit assigns the room job before the owner token can join. A worker-bound pending job is
   // therefore sufficient to mint that exact owner's token; requiring JS_RUNNING creates a cold
@@ -543,6 +547,49 @@ async function awaitDispatchClaim(
     throw new Error('Another dispatch claim did not reach a ready worker');
   }
   return claim;
+}
+
+async function awaitViventiumWorkerClaim(
+  callSessionId: string,
+  browserCapability: string,
+  claimId: string,
+  deadlineMs = Date.now() + DISPATCH_ASSIGNMENT_TIMEOUT_MS
+): Promise<void> {
+  if (!VIVENTIUM_LIBRECHAT_ORIGIN || !VIVENTIUM_CALL_SESSION_SECRET) {
+    throw new Error('The signed call-session runtime is unavailable');
+  }
+  const url = new URL(
+    `/api/viventium/calls/${encodeURIComponent(callSessionId)}/dispatch/status`,
+    VIVENTIUM_LIBRECHAT_ORIGIN
+  );
+  url.searchParams.set('claimId', claimId);
+
+  while (Date.now() < deadlineMs) {
+    const resp = await fetch(url.toString(), {
+      method: 'GET',
+      headers: {
+        'X-VIVENTIUM-CALL-SECRET': VIVENTIUM_CALL_SESSION_SECRET,
+        [CALL_CAPABILITY_HEADER]: browserCapability,
+      },
+      cache: 'no-store',
+      signal: AbortSignal.timeout(remainingDispatchTimeMs(deadlineMs)),
+    });
+    if (!resp.ok) {
+      throw new Error(`Dispatch status failed (${resp.status})`);
+    }
+    const status = (await resp.json()) as {
+      status?: string;
+      isWorkerClaimed?: boolean;
+    };
+    if (status.isWorkerClaimed === true && status.status === 'claimed') {
+      return;
+    }
+    if (status.status === 'expired' || status.status === 'superseded') {
+      throw new Error(`Dispatch claim is ${status.status}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, DISPATCH_ASSIGNMENT_POLL_MS));
+  }
+  throw new Error('No registered LiveKit voice worker consumed the dispatch claim');
 }
 
 async function confirmViventiumDispatch(
@@ -810,7 +857,17 @@ export async function POST(req: Request) {
               options.room_name,
               agentName,
               metadataForDispatchClaim(agentMetadata, claimId),
-              { forceCreate: true, cleanupExistingDispatches: reclaimDispatch },
+              {
+                forceCreate: true,
+                cleanupExistingDispatches: reclaimDispatch,
+                requireAssignedWorker: false,
+              },
+              dispatchWorkDeadlineMs
+            );
+            await awaitViventiumWorkerClaim(
+              callSessionId,
+              browserCapability!,
+              claimId,
               dispatchWorkDeadlineMs
             );
           } else if (claimStatus === 'already') {
@@ -854,7 +911,17 @@ export async function POST(req: Request) {
                 options.room_name,
                 agentName,
                 metadataForDispatchClaim(agentMetadata, replacementClaimId),
-                { forceCreate: true, cleanupExistingDispatches: true },
+                {
+                  forceCreate: true,
+                  cleanupExistingDispatches: true,
+                  requireAssignedWorker: false,
+                },
+                dispatchWorkDeadlineMs
+              );
+              await awaitViventiumWorkerClaim(
+                callSessionId,
+                browserCapability!,
+                replacementClaimId,
                 dispatchWorkDeadlineMs
               );
             }
