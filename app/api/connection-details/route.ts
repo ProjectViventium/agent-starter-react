@@ -312,6 +312,13 @@ type ExplicitDispatchAttempt = {
   createdDispatchId?: string;
 };
 
+type ExplicitDispatchOptions = {
+  forceCreate?: boolean;
+  createIfMissing?: boolean;
+  cleanupExistingDispatches?: boolean;
+  requireAssignedWorker?: boolean;
+};
+
 function metadataForDispatchClaim(
   agentMetadata: string | undefined,
   dispatchClaimId: string | null
@@ -339,12 +346,7 @@ async function performExplicitAgentDispatch(
   roomName: string,
   agentName: string,
   agentMetadata: string | undefined,
-  options: {
-    forceCreate?: boolean;
-    createIfMissing?: boolean;
-    cleanupExistingDispatches?: boolean;
-    requireAssignedWorker?: boolean;
-  } = {},
+  options: ExplicitDispatchOptions = {},
   deadlineMs = Date.now() + DISPATCH_ASSIGNMENT_TIMEOUT_MS,
   attempt?: ExplicitDispatchAttempt
 ): Promise<void> {
@@ -449,11 +451,7 @@ async function ensureExplicitAgentDispatch(
   roomName: string,
   agentName: string,
   agentMetadata: string | undefined,
-  options: {
-    forceCreate?: boolean;
-    createIfMissing?: boolean;
-    cleanupExistingDispatches?: boolean;
-  } = {},
+  options: ExplicitDispatchOptions = {},
   deadlineMs = Date.now() + DISPATCH_ASSIGNMENT_TIMEOUT_MS
 ): Promise<void> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
