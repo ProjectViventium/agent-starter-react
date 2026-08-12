@@ -3,8 +3,18 @@
  * Details: docs/requirements_and_learnings/05_Open_Source_Modifications.md#agent-starter-react
  * VIVENTIUM END */
 import { NextResponse } from 'next/server';
-import { AccessToken, AgentDispatchClient } from 'livekit-server-sdk';
-import { RoomAgentDispatch, RoomConfiguration } from '@livekit/protocol';
+import { AccessToken, AgentDispatchClient, RoomServiceClient } from 'livekit-server-sdk';
+import { AgentDispatch, JobStatus, RoomAgentDispatch, RoomConfiguration } from '@livekit/protocol';
+import {
+  AuthoritativeCallSessionError,
+  applyAuthoritativeCallSession,
+  fetchAuthoritativeCallSession,
+} from '@/lib/authoritative-call-session';
+import {
+  CALL_CAPABILITY_HEADER,
+  readRequestCallBrowserCapability,
+} from '@/lib/call-browser-capability';
+import { parseCallIdentifier } from '@/lib/call-proxy';
 
 const API_KEY = process.env.LIVEKIT_API_KEY;
 const API_SECRET = process.env.LIVEKIT_API_SECRET;
@@ -22,14 +32,14 @@ const VIVENTIUM_LIVEKIT_AGENT_DISPATCH_MODE = process.env.VIVENTIUM_LIVEKIT_AGEN
 const ALLOW_DIRECT_AGENT_DISPATCH =
   process.env.VIVENTIUM_ALLOW_DIRECT_AGENT_DISPATCH === '1' ||
   process.env.VIVENTIUM_ALLOW_DIRECT_AGENT_DISPATCH === 'true';
-const CALL_SESSION_VOICE_SETTINGS_TIMEOUT_MS = 5000;
 const CALL_SESSION_RECONNECT_GRACE_SECONDS = 60;
-
-function getCallSessionVoiceSettingsTimeoutMs() {
-  const parsed = Number(process.env.VIVENTIUM_CALL_SESSION_VOICE_SETTINGS_TIMEOUT_MS || '');
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : CALL_SESSION_VOICE_SETTINGS_TIMEOUT_MS;
-}
-
+const DISPATCH_ASSIGNMENT_TIMEOUT_MS = Math.min(
+  Math.max(Number(process.env.VIVENTIUM_CALL_DISPATCH_ASSIGN_TIMEOUT_MS) || 2500, 250),
+  5000
+);
+const DISPATCH_ASSIGNMENT_POLL_MS = 100;
+const remainingDispatchTimeMs = (deadlineMs: number) =>
+  Math.max(1, Math.floor(deadlineMs - Date.now()));
 type TokenRequest = {
   room_name: string;
   participant_identity: string;
@@ -52,11 +62,6 @@ type TokenRequest = {
   agent_name?: string;
   agent_metadata?: string;
   // VIVENTIUM END
-};
-
-type CallSessionVoiceSettingsResponse = {
-  requestedVoiceRoute?: unknown;
-  savedVoiceRoute?: unknown;
 };
 
 type PendingDispatchConfirmation = {
@@ -183,6 +188,20 @@ function addAgentDispatchToRoomConfig(
   options.roomConfig = nextConfig;
 }
 
+function applyCallSessionRoomRetention(options: TokenRequest): void {
+  const existingConfig = options.room_config ?? options.roomConfig;
+  const roomConfig = existingConfig
+    ? RoomConfiguration.fromJson(existingConfig)
+    : new RoomConfiguration();
+  roomConfig.departureTimeout = Math.max(
+    roomConfig.departureTimeout || 0,
+    CALL_SESSION_RECONNECT_GRACE_SECONDS
+  );
+  const nextConfig = roomConfig.toJson() as ReturnType<RoomConfiguration['toJson']>;
+  options.room_config = nextConfig;
+  options.roomConfig = nextConfig;
+}
+
 function extractDeepLinkFallbacks(req: Request) {
   const referer = req.headers.get('referer') || req.headers.get('referrer') || '';
   if (!referer) {
@@ -279,149 +298,8 @@ function parseCallSessionIdFromAgentMetadata(agentMetadata: string | undefined):
   }
 }
 
-function parseAgentMetadata(agentMetadata: string | undefined): Record<string, unknown> | null {
-  if (!agentMetadata || typeof agentMetadata !== 'string') {
-    return null;
-  }
-  const trimmed = agentMetadata.trim();
-  if (!trimmed) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return null;
-    }
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function buildCallSessionParticipantIdentity(callSessionId: string): string {
-  const safeCallSessionId = callSessionId.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 96);
-  return `viventium-user-${safeCallSessionId}`;
-}
-
-function applyCallSessionRoomRetention(options: TokenRequest): void {
-  const existingConfig = options.room_config ?? options.roomConfig;
-  const roomConfig = existingConfig
-    ? RoomConfiguration.fromJson(existingConfig)
-    : new RoomConfiguration();
-  roomConfig.departureTimeout = Math.max(
-    roomConfig.departureTimeout || 0,
-    CALL_SESSION_RECONNECT_GRACE_SECONDS
-  );
-  const nextConfig = roomConfig.toJson() as ReturnType<RoomConfiguration['toJson']>;
-  options.room_config = nextConfig;
-  options.roomConfig = nextConfig;
-}
-
-function hasRequestedVoiceSelection(route: unknown): boolean {
-  if (!route || typeof route !== 'object' || Array.isArray(route)) {
-    return false;
-  }
-  const state = route as {
-    stt?: { provider?: unknown; variant?: unknown };
-    tts?: { provider?: unknown; variant?: unknown };
-  };
-  const selections = [state.stt, state.tts];
-  return selections.some((selection) => {
-    if (!selection || typeof selection !== 'object') {
-      return false;
-    }
-    return (
-      (typeof selection.provider === 'string' && selection.provider.trim().length > 0) ||
-      (typeof selection.variant === 'string' && selection.variant.trim().length > 0)
-    );
-  });
-}
-
-async function fetchCallSessionVoiceSettings(
-  callSessionId: string
-): Promise<CallSessionVoiceSettingsResponse | null> {
-  if (!VIVENTIUM_LIBRECHAT_ORIGIN || !VIVENTIUM_CALL_SESSION_SECRET) {
-    return null;
-  }
-  const url = new URL(
-    `/api/viventium/calls/${encodeURIComponent(callSessionId)}/voice-settings`,
-    VIVENTIUM_LIBRECHAT_ORIGIN
-  );
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => {
-    controller.abort();
-  }, getCallSessionVoiceSettingsTimeoutMs());
-  let resp: Response;
-  try {
-    resp = await fetch(url.toString(), {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-VIVENTIUM-CALL-SECRET': VIVENTIUM_CALL_SESSION_SECRET,
-      },
-      cache: 'no-store',
-      signal: controller.signal,
-    });
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      return null;
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-  if (!resp.ok) {
-    return null;
-  }
-  const payload = (await resp.json().catch(() => null)) as CallSessionVoiceSettingsResponse | null;
-  return payload && typeof payload === 'object' ? payload : null;
-}
-
-async function hydrateAgentMetadataWithVoiceSettings(
-  callSessionId: string | null,
-  agentMetadata: string | undefined
-): Promise<string | undefined> {
-  if (!callSessionId) {
-    return agentMetadata;
-  }
-
-  const parsedMetadata = parseAgentMetadata(agentMetadata) ?? { callSessionId };
-  const existingRequestedVoiceRoute = parsedMetadata.requestedVoiceRoute;
-  if (hasRequestedVoiceSelection(existingRequestedVoiceRoute)) {
-    return JSON.stringify(parsedMetadata);
-  }
-
-  try {
-    const voiceSettings = await fetchCallSessionVoiceSettings(callSessionId);
-    const authoritativeRequestedVoiceRoute =
-      voiceSettings?.requestedVoiceRoute ?? voiceSettings?.savedVoiceRoute;
-    if (!hasRequestedVoiceSelection(authoritativeRequestedVoiceRoute)) {
-      return JSON.stringify(parsedMetadata);
-    }
-
-    console.info(
-      'Hydrated Viventium requestedVoiceRoute from authoritative call-session settings',
-      {
-        callSessionId,
-      }
-    );
-    return JSON.stringify({
-      ...parsedMetadata,
-      callSessionId,
-      requestedVoiceRoute: authoritativeRequestedVoiceRoute,
-    });
-  } catch (error) {
-    console.error('Error hydrating Viventium voice route metadata:', error);
-    return JSON.stringify(parsedMetadata);
-  }
-}
-
 function dispatchRequiresCallSession(): boolean {
-  return (
-    !ALLOW_DIRECT_AGENT_DISPATCH &&
-    Boolean(VIVENTIUM_LIBRECHAT_ORIGIN) &&
-    Boolean(VIVENTIUM_CALL_SESSION_SECRET)
-  );
+  return !ALLOW_DIRECT_AGENT_DISPATCH;
 }
 
 function callSessionUsesExplicitAgentDispatch(): boolean {
@@ -429,11 +307,48 @@ function callSessionUsesExplicitAgentDispatch(): boolean {
   return mode !== 'token_room_config' && mode !== 'room_config';
 }
 
-async function ensureExplicitAgentDispatch(
+type ExplicitDispatchAttempt = {
+  cancelled: boolean;
+  createdDispatchId?: string;
+};
+
+type ExplicitDispatchOptions = {
+  forceCreate?: boolean;
+  createIfMissing?: boolean;
+  cleanupExistingDispatches?: boolean;
+  requireAssignedWorker?: boolean;
+};
+
+function metadataForDispatchClaim(
+  agentMetadata: string | undefined,
+  dispatchClaimId: string | null
+): string | undefined {
+  if (!dispatchClaimId) return agentMetadata;
+  try {
+    const parsed = JSON.parse(agentMetadata || '{}') as Record<string, unknown>;
+    return JSON.stringify({ ...parsed, dispatchClaimId });
+  } catch {
+    return JSON.stringify({ dispatchClaimId });
+  }
+}
+
+async function deleteExplicitAgentDispatch(dispatchId: string, roomName: string): Promise<void> {
+  const host =
+    toDispatchHost(process.env.LIVEKIT_API_HOST) ??
+    toDispatchHost(process.env.LIVEKIT_URL) ??
+    toDispatchHost(process.env.NEXT_PUBLIC_LIVEKIT_URL);
+  if (!host) return;
+  const dispatch = new AgentDispatchClient(host, API_KEY, API_SECRET);
+  await dispatch.deleteDispatch(dispatchId, roomName);
+}
+
+async function performExplicitAgentDispatch(
   roomName: string,
   agentName: string,
   agentMetadata: string | undefined,
-  options: { forceCreate?: boolean } = {}
+  options: ExplicitDispatchOptions = {},
+  deadlineMs = Date.now() + DISPATCH_ASSIGNMENT_TIMEOUT_MS,
+  attempt?: ExplicitDispatchAttempt
 ): Promise<void> {
   const host =
     toDispatchHost(process.env.LIVEKIT_API_HOST) ??
@@ -445,46 +360,137 @@ async function ensureExplicitAgentDispatch(
   }
 
   const dispatch = new AgentDispatchClient(host, API_KEY, API_SECRET);
+  const rooms = new RoomServiceClient(host, API_KEY, API_SECRET);
+  await rooms.createRoom({
+    name: roomName,
+    emptyTimeout: CALL_SESSION_RECONNECT_GRACE_SECONDS,
+    departureTimeout: CALL_SESSION_RECONNECT_GRACE_SECONDS,
+  });
+  if (attempt?.cancelled) {
+    throw new Error('LiveKit dispatch attempt was superseded');
+  }
+  let selectedDispatch: AgentDispatch | undefined;
   if (options.forceCreate === true) {
-    try {
-      const existing = await dispatch.listDispatch(roomName);
-      const existingExplicitDispatches = existing.filter(
-        (entry) =>
-          entry.agentName === agentName && typeof entry.id === 'string' && entry.id.length > 0
-      );
-      await Promise.allSettled(
-        existingExplicitDispatches.map((entry) => dispatch.deleteDispatch(entry.id, roomName))
-      );
-    } catch (error) {
-      console.warn('Unable to list existing LiveKit dispatches before forced create:', error);
+    if (options.cleanupExistingDispatches === true) {
+      try {
+        const existing = (await dispatch.listDispatch(roomName)) ?? [];
+        const existingExplicitDispatches = existing.filter(
+          (entry) =>
+            entry.agentName === agentName && typeof entry.id === 'string' && entry.id.length > 0
+        );
+        await Promise.allSettled(
+          existingExplicitDispatches.map((entry) => dispatch.deleteDispatch(entry.id, roomName))
+        );
+      } catch {
+        console.warn('Unable to list existing LiveKit dispatches before forced create');
+      }
     }
-    await dispatch.createDispatch(roomName, agentName, {
+    selectedDispatch = await dispatch.createDispatch(roomName, agentName, {
       metadata:
         typeof agentMetadata === 'string' && agentMetadata.length > 0 ? agentMetadata : undefined,
     });
-    return;
+    if (selectedDispatch?.id && attempt) {
+      attempt.createdDispatchId = selectedDispatch.id;
+    }
+  } else {
+    const existing = (await dispatch.listDispatch(roomName)) ?? [];
+    // Token room-config entries can appear in ListDispatch without a real dispatch id. Only an
+    // explicit dispatch id proves the worker assignment already exists.
+    selectedDispatch = existing.find(
+      (entry) =>
+        entry.agentName === agentName && typeof entry.id === 'string' && entry.id.length > 0
+    );
+    if (!selectedDispatch) {
+      if (options.createIfMissing === false) {
+        throw new Error('The confirmed LiveKit dispatch is no longer available');
+      }
+      selectedDispatch = await dispatch.createDispatch(roomName, agentName, {
+        metadata:
+          typeof agentMetadata === 'string' && agentMetadata.length > 0 ? agentMetadata : undefined,
+      });
+      if (selectedDispatch?.id && attempt) {
+        attempt.createdDispatchId = selectedDispatch.id;
+      }
+    }
   }
 
-  const existing = await dispatch.listDispatch(roomName);
-  // Token room-config entries can appear in ListDispatch without a real dispatch id. Only an
-  // explicit dispatch id proves the worker assignment already exists.
-  const already = existing.some(
-    (entry) => entry.agentName === agentName && typeof entry.id === 'string' && entry.id.length > 0
-  );
-  if (already) {
+  const dispatchId = selectedDispatch?.id;
+  if (!dispatchId) {
+    throw new Error('LiveKit did not return an explicit dispatch identity');
+  }
+  if (attempt?.cancelled && attempt.createdDispatchId === dispatchId) {
+    await dispatch.deleteDispatch(dispatchId, roomName).catch(() => undefined);
+    throw new Error('LiveKit dispatch attempt was superseded');
+  }
+  if (options.requireAssignedWorker === false) {
     return;
   }
-  await dispatch.createDispatch(roomName, agentName, {
-    metadata:
-      typeof agentMetadata === 'string' && agentMetadata.length > 0 ? agentMetadata : undefined,
-  });
+  // LiveKit assigns the room job before the owner token can join. A worker-bound pending job is
+  // therefore sufficient to mint that exact owner's token; requiring JS_RUNNING creates a cold
+  // start deadlock because the gateway is simultaneously waiting for the canonical participant.
+  const dispatchHasAssignedWorker = (candidate: AgentDispatch | undefined) =>
+    candidate?.state?.jobs?.some(
+      (job) =>
+        job.dispatchId === dispatchId &&
+        (job.state?.status === JobStatus.JS_PENDING ||
+          job.state?.status === JobStatus.JS_RUNNING) &&
+        typeof job.state.workerId === 'string' &&
+        job.state.workerId.trim().length > 0
+    ) === true;
+  let current: AgentDispatch | undefined = selectedDispatch;
+  while (!dispatchHasAssignedWorker(current) && Date.now() < deadlineMs) {
+    await new Promise((resolve) => setTimeout(resolve, DISPATCH_ASSIGNMENT_POLL_MS));
+    current = await dispatch.getDispatch(dispatchId, roomName);
+  }
+  if (!dispatchHasAssignedWorker(current)) {
+    throw new Error('No registered LiveKit voice worker accepted the dispatch');
+  }
+}
+
+async function ensureExplicitAgentDispatch(
+  roomName: string,
+  agentName: string,
+  agentMetadata: string | undefined,
+  options: ExplicitDispatchOptions = {},
+  deadlineMs = Date.now() + DISPATCH_ASSIGNMENT_TIMEOUT_MS
+): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const attempt: ExplicitDispatchAttempt = { cancelled: false };
+  try {
+    await Promise.race([
+      performExplicitAgentDispatch(
+        roomName,
+        agentName,
+        agentMetadata,
+        options,
+        deadlineMs,
+        attempt
+      ),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error('LiveKit dispatch readiness timed out')),
+          remainingDispatchTimeMs(deadlineMs)
+        );
+      }),
+    ]);
+  } catch (error) {
+    attempt.cancelled = true;
+    if (attempt.createdDispatchId) {
+      await deleteExplicitAgentDispatch(attempt.createdDispatchId, roomName).catch(() => undefined);
+    }
+    throw error;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 async function claimViventiumDispatch(
   callSessionId: string,
+  browserCapability: string,
   roomName: string,
   agentName: string,
-  options?: { reclaimConfirmed?: boolean }
+  options?: { reclaimConfirmed?: boolean },
+  deadlineMs = Date.now() + DISPATCH_ASSIGNMENT_TIMEOUT_MS
 ): Promise<{ status?: string; claimId?: string | null } | null> {
   if (!VIVENTIUM_LIBRECHAT_ORIGIN || !VIVENTIUM_CALL_SESSION_SECRET) {
     return null;
@@ -498,6 +504,7 @@ async function claimViventiumDispatch(
     headers: {
       'Content-Type': 'application/json',
       'X-VIVENTIUM-CALL-SECRET': VIVENTIUM_CALL_SESSION_SECRET,
+      [CALL_CAPABILITY_HEADER]: browserCapability,
     },
     body: JSON.stringify({
       roomName,
@@ -505,6 +512,7 @@ async function claimViventiumDispatch(
       reclaimConfirmed: options?.reclaimConfirmed === true,
     }),
     cache: 'no-store',
+    signal: AbortSignal.timeout(remainingDispatchTimeMs(deadlineMs)),
   });
   if (!resp.ok) {
     throw new Error(`Dispatch claim failed (${resp.status})`);
@@ -512,11 +520,83 @@ async function claimViventiumDispatch(
   return (await resp.json()) as { status?: string; claimId?: string | null };
 }
 
+async function awaitDispatchClaim(
+  initialClaim: { status?: string; claimId?: string | null } | null,
+  callSessionId: string,
+  browserCapability: string,
+  roomName: string,
+  agentName: string,
+  options?: { reclaimConfirmed?: boolean },
+  deadlineMs = Date.now() + DISPATCH_ASSIGNMENT_TIMEOUT_MS
+) {
+  let claim = initialClaim;
+  while (claim?.status === 'in_flight' && Date.now() < deadlineMs) {
+    await new Promise((resolve) => setTimeout(resolve, DISPATCH_ASSIGNMENT_POLL_MS));
+    claim = await claimViventiumDispatch(
+      callSessionId,
+      browserCapability,
+      roomName,
+      agentName,
+      options,
+      deadlineMs
+    );
+  }
+  if (claim?.status === 'in_flight') {
+    throw new Error('Another dispatch claim did not reach a ready worker');
+  }
+  return claim;
+}
+
+async function awaitViventiumWorkerClaim(
+  callSessionId: string,
+  browserCapability: string,
+  claimId: string,
+  deadlineMs = Date.now() + DISPATCH_ASSIGNMENT_TIMEOUT_MS
+): Promise<void> {
+  if (!VIVENTIUM_LIBRECHAT_ORIGIN || !VIVENTIUM_CALL_SESSION_SECRET) {
+    throw new Error('The signed call-session runtime is unavailable');
+  }
+  const url = new URL(
+    `/api/viventium/calls/${encodeURIComponent(callSessionId)}/dispatch/status`,
+    VIVENTIUM_LIBRECHAT_ORIGIN
+  );
+  url.searchParams.set('claimId', claimId);
+
+  while (Date.now() < deadlineMs) {
+    const resp = await fetch(url.toString(), {
+      method: 'GET',
+      headers: {
+        'X-VIVENTIUM-CALL-SECRET': VIVENTIUM_CALL_SESSION_SECRET,
+        [CALL_CAPABILITY_HEADER]: browserCapability,
+      },
+      cache: 'no-store',
+      signal: AbortSignal.timeout(remainingDispatchTimeMs(deadlineMs)),
+    });
+    if (!resp.ok) {
+      throw new Error(`Dispatch status failed (${resp.status})`);
+    }
+    const status = (await resp.json()) as {
+      status?: string;
+      isWorkerClaimed?: boolean;
+    };
+    if (status.isWorkerClaimed === true && status.status === 'claimed') {
+      return;
+    }
+    if (status.status === 'expired' || status.status === 'superseded') {
+      throw new Error(`Dispatch claim is ${status.status}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, DISPATCH_ASSIGNMENT_POLL_MS));
+  }
+  throw new Error('No registered LiveKit voice worker consumed the dispatch claim');
+}
+
 async function confirmViventiumDispatch(
   callSessionId: string,
+  browserCapability: string,
   claimId: string,
   status: 'created' | 'failed',
-  error?: unknown
+  error?: unknown,
+  deadlineMs = Date.now() + DISPATCH_ASSIGNMENT_TIMEOUT_MS
 ): Promise<void> {
   if (!VIVENTIUM_LIBRECHAT_ORIGIN || !VIVENTIUM_CALL_SESSION_SECRET) {
     return;
@@ -534,17 +614,43 @@ async function confirmViventiumDispatch(
     headers: {
       'Content-Type': 'application/json',
       'X-VIVENTIUM-CALL-SECRET': VIVENTIUM_CALL_SESSION_SECRET,
+      [CALL_CAPABILITY_HEADER]: browserCapability,
     },
     body: JSON.stringify(body),
     cache: 'no-store',
+    signal: AbortSignal.timeout(remainingDispatchTimeMs(deadlineMs)),
   });
   if (!resp.ok) {
-    console.error('Dispatch confirm failed:', resp.status, await resp.text());
+    console.error('Dispatch confirm failed:', resp.status);
   }
 }
 
 export async function POST(req: Request) {
   try {
+    if (Boolean(VIVENTIUM_LIBRECHAT_ORIGIN) !== Boolean(VIVENTIUM_CALL_SESSION_SECRET)) {
+      return NextResponse.json(
+        {
+          code: 'gateway_down',
+          message: 'The signed call-session runtime is only partially configured.',
+          retryable: false,
+        },
+        { status: 503 }
+      );
+    }
+    if (
+      !VIVENTIUM_LIBRECHAT_ORIGIN &&
+      !VIVENTIUM_CALL_SESSION_SECRET &&
+      !ALLOW_DIRECT_AGENT_DISPATCH
+    ) {
+      return NextResponse.json(
+        {
+          code: 'gateway_down',
+          message: 'Signed calling is not configured and unsigned development calling is disabled.',
+          retryable: false,
+        },
+        { status: 503 }
+      );
+    }
     const browserLiveKitUrl = resolveBrowserLiveKitUrl(req);
     if (!LIVEKIT_URL && !NEXT_PUBLIC_LIVEKIT_URL && !browserLiveKitUrl) {
       throw new Error('LIVEKIT_URL is not defined');
@@ -559,6 +665,105 @@ export async function POST(req: Request) {
     const body = await req.json().catch(() => ({}));
     const options = normalizeOptions(body);
     const deepLinkFallbacks = extractDeepLinkFallbacks(req);
+    const metadataCallSessionId = parseCallSessionIdFromAgentMetadata(options.agentMetadata);
+    const participantMetadataCallSessionId = parseCallSessionIdFromAgentMetadata(
+      options.participantMetadata ?? options.participant_metadata
+    );
+    const deepLinkCallSessionId = deepLinkFallbacks.callSessionId;
+    if (
+      (metadataCallSessionId && !parseCallIdentifier(metadataCallSessionId)) ||
+      (participantMetadataCallSessionId &&
+        !parseCallIdentifier(participantMetadataCallSessionId)) ||
+      (deepLinkCallSessionId && !parseCallIdentifier(deepLinkCallSessionId)) ||
+      (metadataCallSessionId &&
+        deepLinkCallSessionId &&
+        metadataCallSessionId !== deepLinkCallSessionId) ||
+      (participantMetadataCallSessionId &&
+        metadataCallSessionId &&
+        participantMetadataCallSessionId !== metadataCallSessionId) ||
+      (participantMetadataCallSessionId &&
+        deepLinkCallSessionId &&
+        participantMetadataCallSessionId !== deepLinkCallSessionId)
+    ) {
+      return NextResponse.json(
+        {
+          code: 'auth_expired',
+          message: 'The signed call session does not match this launch request.',
+          retryable: false,
+        },
+        { status: 409 }
+      );
+    }
+    const currentCallSessionId = parseCallIdentifier(
+      metadataCallSessionId ?? participantMetadataCallSessionId ?? deepLinkCallSessionId
+    );
+    if (!currentCallSessionId && dispatchRequiresCallSession()) {
+      return NextResponse.json(
+        {
+          code: 'auth_expired',
+          message: 'Start this call from Viventium to create a signed call session.',
+          retryable: false,
+        },
+        { status: 401 }
+      );
+    }
+    const browserCapability = readRequestCallBrowserCapability(req);
+    if (currentCallSessionId) {
+      if (!browserCapability) {
+        return NextResponse.json(
+          {
+            code: 'auth_expired',
+            message: 'The call capability is missing or invalid.',
+            retryable: false,
+          },
+          { status: 401 }
+        );
+      }
+      try {
+        const canonical = await fetchAuthoritativeCallSession(
+          currentCallSessionId,
+          browserCapability
+        );
+        if (canonical.status === 'ended') {
+          throw new AuthoritativeCallSessionError(
+            'auth_expired',
+            'This call has ended. Start a fresh call from Viventium.',
+            410,
+            false
+          );
+        }
+        applyAuthoritativeCallSession(options, canonical);
+        applyCallSessionRoomRetention(options);
+      } catch (error) {
+        if (error instanceof AuthoritativeCallSessionError) {
+          return NextResponse.json(
+            { code: error.code, message: error.message, retryable: error.retryable },
+            { status: error.status }
+          );
+        }
+        throw error;
+      }
+    }
+
+    if (!currentCallSessionId && ALLOW_DIRECT_AGENT_DISPATCH) {
+      // Explicit unsigned development mode is isolated from every caller-selected or signed-call
+      // room. A fresh server-random room/identity prevents a guessed `lc-*` room from becoming an
+      // eavesdropping capability.
+      options.room_name = '';
+      options.roomName = undefined;
+      options.participant_identity = '';
+      options.participantIdentity = undefined;
+      options.participantName = undefined;
+      options.participant_metadata = undefined;
+      options.participantMetadata = undefined;
+      options.participant_attributes = undefined;
+      options.participantAttributes = undefined;
+      options.agentName = undefined;
+      options.agentMetadata = undefined;
+      options.room_config = undefined;
+      options.roomConfig = undefined;
+    }
+
     const suffix = crypto.randomUUID().substring(0, 8);
     options.room_name = options.room_name || options.roomName || `room-${suffix}`;
     options.participant_identity =
@@ -571,50 +776,27 @@ export async function POST(req: Request) {
       options.participant_name = options.participantName ?? options.participant_identity;
     }
 
-    if (!options.agentName && deepLinkFallbacks.agentName) {
+    if (
+      !currentCallSessionId &&
+      !VIVENTIUM_LIBRECHAT_ORIGIN &&
+      !VIVENTIUM_CALL_SESSION_SECRET &&
+      !ALLOW_DIRECT_AGENT_DISPATCH &&
+      !options.agentName &&
+      deepLinkFallbacks.agentName
+    ) {
       options.agentName = deepLinkFallbacks.agentName;
-    }
-
-    let currentCallSessionId = parseCallSessionIdFromAgentMetadata(options.agentMetadata);
-    if (!currentCallSessionId && deepLinkFallbacks.callSessionId) {
-      currentCallSessionId = deepLinkFallbacks.callSessionId;
-      const metadata = JSON.stringify({ callSessionId: deepLinkFallbacks.callSessionId });
-      if (!options.agentMetadata) {
-        options.agentMetadata = metadata;
-      }
-      if (!options.participant_metadata && !options.participantMetadata) {
-        options.participant_metadata = metadata;
-        options.participantMetadata = metadata;
-      }
-    }
-
-    if (currentCallSessionId) {
-      options.participant_identity = buildCallSessionParticipantIdentity(currentCallSessionId);
-      if (!options.participant_name && !options.participantName) {
-        options.participant_name = options.participant_identity;
-      }
-      applyCallSessionRoomRetention(options);
-    }
-
-    let hydratedAgentMetadata = await hydrateAgentMetadataWithVoiceSettings(
-      currentCallSessionId,
-      options.agentMetadata
-    );
-    if (currentCallSessionId && options.participant_identity) {
-      hydratedAgentMetadata = JSON.stringify({
-        ...(parseAgentMetadata(hydratedAgentMetadata) ?? {}),
-        callSessionId: currentCallSessionId,
-        participantIdentity: options.participant_identity,
-      });
-    }
-    if (hydratedAgentMetadata) {
-      options.agentMetadata = hydratedAgentMetadata;
     }
 
     const agentName = options.agentName;
     const agentMetadata = options.agentMetadata;
     const reclaimDispatch = options.reclaimDispatch === true;
     let pendingDispatchConfirmation: PendingDispatchConfirmation | null = null;
+    const dispatchDeadlineMs = Date.now() + DISPATCH_ASSIGNMENT_TIMEOUT_MS;
+    const dispatchCleanupReserveMs = Math.min(
+      250,
+      Math.max(1, Math.floor(DISPATCH_ASSIGNMENT_TIMEOUT_MS / 4))
+    );
+    const dispatchWorkDeadlineMs = dispatchDeadlineMs - dispatchCleanupReserveMs;
     if (agentName && agentName.trim().length > 0) {
       const callSessionId = currentCallSessionId;
       if (!callSessionId && dispatchRequiresCallSession()) {
@@ -629,9 +811,22 @@ export async function POST(req: Request) {
 
       if (callSessionId) {
         try {
-          const claim = await claimViventiumDispatch(callSessionId, options.room_name, agentName, {
-            reclaimConfirmed: reclaimDispatch,
-          });
+          const claim = await awaitDispatchClaim(
+            await claimViventiumDispatch(
+              callSessionId,
+              browserCapability!,
+              options.room_name,
+              agentName,
+              { reclaimConfirmed: reclaimDispatch },
+              dispatchWorkDeadlineMs
+            ),
+            callSessionId,
+            browserCapability!,
+            options.room_name,
+            agentName,
+            { reclaimConfirmed: reclaimDispatch },
+            dispatchWorkDeadlineMs
+          );
           const claimStatus = claim?.status ?? '';
           if (claimStatus === 'expired') {
             return NextResponse.json(
@@ -641,38 +836,115 @@ export async function POST(req: Request) {
               { status: 410 }
             );
           }
-          const useExplicitAgentDispatch = callSessionUsesExplicitAgentDispatch();
-          if (!useExplicitAgentDispatch) {
-            addAgentDispatchToRoomConfig(options, agentName, agentMetadata);
-          }
+          // A watchdog reclaim must create a real side effect even when normal calls use token
+          // room-config dispatch. Its response token is intentionally discarded by the caller.
+          const useExplicitAgentDispatch =
+            callSessionUsesExplicitAgentDispatch() || reclaimDispatch;
           const claimId = typeof claim?.claimId === 'string' ? claim.claimId : null;
           if (claimStatus === 'claimed' && claimId) {
             pendingDispatchConfirmation = { callSessionId, claimId };
           }
-          if (
-            useExplicitAgentDispatch &&
-            (claimStatus === 'claimed' || claimStatus === 'already')
-          ) {
-            await ensureExplicitAgentDispatch(options.room_name, agentName, agentMetadata, {
-              forceCreate: claimStatus === 'claimed',
-            });
+          if (!useExplicitAgentDispatch && claimStatus === 'claimed' && claimId) {
+            addAgentDispatchToRoomConfig(
+              options,
+              agentName,
+              metadataForDispatchClaim(agentMetadata, claimId)
+            );
+          } else if (useExplicitAgentDispatch && claimStatus === 'claimed' && claimId) {
+            await ensureExplicitAgentDispatch(
+              options.room_name,
+              agentName,
+              metadataForDispatchClaim(agentMetadata, claimId),
+              {
+                forceCreate: true,
+                cleanupExistingDispatches: reclaimDispatch,
+                requireAssignedWorker: false,
+              },
+              dispatchWorkDeadlineMs
+            );
+            await awaitViventiumWorkerClaim(
+              callSessionId,
+              browserCapability!,
+              claimId,
+              dispatchWorkDeadlineMs
+            );
+          } else if (claimStatus === 'already') {
+            // LiveKit applies token room configuration only when it creates a room. Reconnects
+            // into an existing room must reuse a proven explicit dispatch or recover through a
+            // fresh, server-claimed explicit dispatch; embedding another token agent is ignored.
+            try {
+              await ensureExplicitAgentDispatch(
+                options.room_name,
+                agentName,
+                agentMetadata,
+                { createIfMissing: false },
+                dispatchWorkDeadlineMs
+              );
+            } catch {
+              const replacement = await awaitDispatchClaim(
+                await claimViventiumDispatch(
+                  callSessionId,
+                  browserCapability!,
+                  options.room_name,
+                  agentName,
+                  { reclaimConfirmed: true },
+                  dispatchWorkDeadlineMs
+                ),
+                callSessionId,
+                browserCapability!,
+                options.room_name,
+                agentName,
+                { reclaimConfirmed: true },
+                dispatchWorkDeadlineMs
+              );
+              const replacementClaimId =
+                replacement?.status === 'claimed' && typeof replacement.claimId === 'string'
+                  ? replacement.claimId
+                  : null;
+              if (!replacementClaimId) {
+                throw new Error('Confirmed dispatch could not be reclaimed');
+              }
+              pendingDispatchConfirmation = { callSessionId, claimId: replacementClaimId };
+              await ensureExplicitAgentDispatch(
+                options.room_name,
+                agentName,
+                metadataForDispatchClaim(agentMetadata, replacementClaimId),
+                {
+                  forceCreate: true,
+                  cleanupExistingDispatches: true,
+                  requireAssignedWorker: false,
+                },
+                dispatchWorkDeadlineMs
+              );
+              await awaitViventiumWorkerClaim(
+                callSessionId,
+                browserCapability!,
+                replacementClaimId,
+                dispatchWorkDeadlineMs
+              );
+            }
+          } else {
+            throw new Error('Dispatch claim did not authorize a worker assignment');
           }
         } catch (error) {
-          console.error('Error claiming Viventium dispatch lease:', error);
+          console.error('Viventium dispatch was not accepted by a ready worker');
           if (pendingDispatchConfirmation) {
             await confirmViventiumDispatch(
               pendingDispatchConfirmation.callSessionId,
+              browserCapability!,
               pendingDispatchConfirmation.claimId,
               'failed',
-              error
-            ).catch((confirmError) => {
-              console.error('Error releasing failed Viventium dispatch claim:', confirmError);
+              error,
+              dispatchDeadlineMs
+            ).catch(() => {
+              console.error('Failed Viventium dispatch claim could not be released');
             });
           }
           return NextResponse.json(
             {
-              message:
-                'Viventium could not prepare this voice call session. Please try starting the call again.',
+              code: 'gateway_down',
+              message: 'No ready voice worker accepted this call. Please try again.',
+              retryable: true,
             },
             { status: 503 }
           );
@@ -680,8 +952,8 @@ export async function POST(req: Request) {
       } else {
         try {
           await ensureExplicitAgentDispatch(options.room_name, agentName, agentMetadata);
-        } catch (error) {
-          console.error('Error creating agent dispatch:', error);
+        } catch {
+          console.error('Agent dispatch was not accepted by a ready worker');
           return NextResponse.json({ message: 'Agent dispatch failed' }, { status: 500 });
         }
       }
@@ -693,17 +965,22 @@ export async function POST(req: Request) {
       if (pendingDispatchConfirmation) {
         await confirmViventiumDispatch(
           pendingDispatchConfirmation.callSessionId,
+          browserCapability!,
           pendingDispatchConfirmation.claimId,
-          'created'
+          'created',
+          undefined,
+          dispatchDeadlineMs
         );
       }
     } catch (error) {
       if (pendingDispatchConfirmation) {
         await confirmViventiumDispatch(
           pendingDispatchConfirmation.callSessionId,
+          browserCapability!,
           pendingDispatchConfirmation.claimId,
           'failed',
-          error
+          error,
+          Date.now() + Math.min(1_000, DISPATCH_ASSIGNMENT_TIMEOUT_MS)
         );
       }
       throw error;

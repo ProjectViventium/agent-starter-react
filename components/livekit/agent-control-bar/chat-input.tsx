@@ -92,7 +92,7 @@ export function ChatInput({
           className="self-start"
         >
           {isSending ? (
-            <SpinnerIcon className="animate-spin" weight="bold" />
+            <SpinnerIcon className="animate-spin motion-reduce:animate-none" weight="bold" />
           ) : (
             <PaperPlaneRightIcon weight="bold" />
           )}

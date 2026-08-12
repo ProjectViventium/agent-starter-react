@@ -8,6 +8,11 @@
  * - This route proxies voice-settings reads/writes using the server-side secret.
  * VIVENTIUM END */
 import { NextResponse } from 'next/server';
+import {
+  CALL_CAPABILITY_HEADER,
+  readRequestCallBrowserCapability,
+} from '@/lib/call-browser-capability';
+import { normalizeProxyFailure, parseCallIdentifier } from '@/lib/call-proxy';
 
 const VIVENTIUM_LIBRECHAT_ORIGIN = process.env.VIVENTIUM_LIBRECHAT_ORIGIN;
 const VIVENTIUM_CALL_SESSION_SECRET = process.env.VIVENTIUM_CALL_SESSION_SECRET;
@@ -31,19 +36,21 @@ function buildTargetUrl(callSessionId: string): URL {
   );
 }
 
-function getSharedHeaders(): HeadersInit {
+function getSharedHeaders(browserCapability: string): HeadersInit {
   if (!VIVENTIUM_CALL_SESSION_SECRET) {
     throw new Error('VIVENTIUM_CALL_SESSION_SECRET is not configured');
   }
   return {
     'Content-Type': 'application/json',
     'X-VIVENTIUM-CALL-SECRET': VIVENTIUM_CALL_SESSION_SECRET,
+    [CALL_CAPABILITY_HEADER]: browserCapability,
   };
 }
 
 async function proxyVoiceSettingsRequest(
   url: URL,
   method: 'GET' | 'POST',
+  browserCapability: string,
   body?: Record<string, unknown>
 ) {
   const controller = new AbortController();
@@ -57,7 +64,7 @@ async function proxyVoiceSettingsRequest(
   try {
     response = await fetch(url.toString(), {
       method,
-      headers: getSharedHeaders(),
+      headers: getSharedHeaders(browserCapability),
       body: method === 'POST' ? JSON.stringify(body ?? {}) : undefined,
       cache: 'no-store',
       signal: controller.signal,
@@ -67,8 +74,9 @@ async function proxyVoiceSettingsRequest(
       return {
         status: 504,
         payload: {
-          message:
-            'Viventium could not load voice settings before the voice runtime responded. You can still start the call; retry voice settings after the runtime is ready.',
+          code: 'gateway_down',
+          message: 'Viventium could not load voice settings before the voice runtime responded.',
+          retryable: true,
         },
       };
     }
@@ -136,6 +144,13 @@ function buildResponse(
     body.selectionVoiceRoute = selectionVoiceRoute;
   }
 
+  if (status >= 400) {
+    return NextResponse.json(normalizeProxyFailure(status, body), {
+      status,
+      headers: { 'Cache-Control': 'no-store' },
+    });
+  }
+
   return NextResponse.json(body, {
     status,
     headers: {
@@ -147,18 +162,38 @@ function buildResponse(
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
-    const callSessionId = (searchParams.get('callSessionId') || '').trim();
+    const callSessionId = parseCallIdentifier(searchParams.get('callSessionId'));
     if (!callSessionId) {
-      return NextResponse.json({ message: 'callSessionId is required' }, { status: 400 });
+      return NextResponse.json(
+        { code: 'unknown', message: 'A valid callSessionId is required.', retryable: false },
+        { status: 400 }
+      );
+    }
+    const browserCapability = readRequestCallBrowserCapability(req);
+    if (!browserCapability) {
+      return NextResponse.json(
+        {
+          code: 'auth_expired',
+          message: 'The call capability is missing or invalid.',
+          retryable: false,
+        },
+        { status: 401 }
+      );
     }
     const [proxyResult, selectionVoiceRoute] = await Promise.all([
-      proxyVoiceSettingsRequest(buildTargetUrl(callSessionId), 'GET'),
+      proxyVoiceSettingsRequest(buildTargetUrl(callSessionId), 'GET', browserCapability),
       fetchSelectionVoiceRoute(),
     ]);
     return buildResponse(proxyResult.status, proxyResult.payload, selectionVoiceRoute);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    return NextResponse.json({ message }, { status: 500 });
+  } catch {
+    return NextResponse.json(
+      {
+        code: 'gateway_down',
+        message: 'Viventium could not reach the voice settings runtime.',
+        retryable: true,
+      },
+      { status: 503 }
+    );
   }
 }
 
@@ -168,21 +203,41 @@ export async function POST(req: Request) {
       callSessionId?: unknown;
       requestedVoiceRoute?: unknown;
     };
-    const callSessionId = typeof body.callSessionId === 'string' ? body.callSessionId.trim() : '';
+    const callSessionId = parseCallIdentifier(body.callSessionId);
     if (!callSessionId) {
-      return NextResponse.json({ message: 'callSessionId is required' }, { status: 400 });
+      return NextResponse.json(
+        { code: 'unknown', message: 'A valid callSessionId is required.', retryable: false },
+        { status: 400 }
+      );
+    }
+    const browserCapability = readRequestCallBrowserCapability(req);
+    if (!browserCapability) {
+      return NextResponse.json(
+        {
+          code: 'auth_expired',
+          message: 'The call capability is missing or invalid.',
+          retryable: false,
+        },
+        { status: 401 }
+      );
     }
 
     const [proxyResult, selectionVoiceRoute] = await Promise.all([
-      proxyVoiceSettingsRequest(buildTargetUrl(callSessionId), 'POST', {
+      proxyVoiceSettingsRequest(buildTargetUrl(callSessionId), 'POST', browserCapability, {
         requestedVoiceRoute: body.requestedVoiceRoute,
       }),
       fetchSelectionVoiceRoute(),
     ]);
 
     return buildResponse(proxyResult.status, proxyResult.payload, selectionVoiceRoute);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    return NextResponse.json({ message }, { status: 500 });
+  } catch {
+    return NextResponse.json(
+      {
+        code: 'gateway_down',
+        message: 'Viventium could not reach the voice settings runtime.',
+        retryable: true,
+      },
+      { status: 503 }
+    );
   }
 }

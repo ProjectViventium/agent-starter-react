@@ -41,7 +41,10 @@ export function TrackToggle({ source, pressed, pending, className, ...props }: T
 
   return (
     <Toggle pressed={pressed} aria-label={`Toggle ${source}`} className={cn(className)} {...props}>
-      <IconComponent weight="bold" className={cn(pending && 'animate-spin')} />
+      <IconComponent
+        weight="bold"
+        className={cn(pending && 'animate-spin motion-reduce:animate-none')}
+      />
       {props.children}
     </Toggle>
   );

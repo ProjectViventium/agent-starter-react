@@ -1,14 +1,16 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   type VoiceRouteMetadata,
   type VoiceRouteState,
-  autoCorrectRequestedVoiceRoute,
   createEmptyVoiceRouteState,
+  normalizeProviderName,
   normalizeVoiceRouteMetadata,
   normalizeVoiceRouteState,
 } from '@/hooks/useVoiceRoute';
+import { callBrowserCapabilityHeaders } from '@/lib/call-browser-capability';
+import { type CallIssue, CallRequestError, callIssueFromResponse } from '@/lib/call-start';
 
 type VoiceSettingsResponse = {
   requestedVoiceRoute?: unknown;
@@ -17,6 +19,8 @@ type VoiceSettingsResponse = {
   assistantRoute?: unknown;
   message?: string;
   error?: string;
+  code?: unknown;
+  retryable?: unknown;
 };
 
 const INITIAL_LOAD_RETRY_MS = 1500;
@@ -40,11 +44,13 @@ export type AssistantRouteInfo = {
 export type UseCallSessionVoiceSettingsResult = {
   requestedVoiceRoute: VoiceRouteState;
   savedVoiceRoute: VoiceRouteState;
+  configuredVoiceRoute: VoiceRouteState;
   selectionVoiceRoute: VoiceRouteMetadata | null;
   assistantRoute: AssistantRouteInfo | null;
   isLoading: boolean;
   isSaving: boolean;
   error: string | null;
+  issue: CallIssue | null;
   notice: string | null;
   setRequestedVoiceRoute: (nextRoute: VoiceRouteState) => Promise<boolean>;
 };
@@ -63,23 +69,14 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
 }
 
-function isLikelyFetchNetworkError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-  const message = error.message.trim().toLowerCase();
-  return (
-    message === 'failed to fetch' ||
-    message === 'fetch failed' ||
-    message === 'load failed' ||
-    message.includes('networkerror')
-  );
-}
-
-class VoiceSettingsTimeoutError extends Error {
+class VoiceSettingsTimeoutError extends CallRequestError {
   constructor() {
     super(
-      'Viventium could not load voice settings before the voice runtime responded. You can still start the call; retry voice settings after the runtime is ready.'
+      {
+        kind: 'gateway_down',
+        message: 'Viventium could not load voice settings before the voice runtime responded.',
+      },
+      true
     );
     this.name = 'VoiceSettingsTimeoutError';
   }
@@ -90,11 +87,15 @@ function isVoiceSettingsTimeoutError(error: unknown): error is VoiceSettingsTime
 }
 
 function isTransientVoiceSettingsLoadError(error: unknown): boolean {
-  return isLikelyFetchNetworkError(error) || isVoiceSettingsTimeoutError(error);
+  return (
+    error instanceof TypeError ||
+    isVoiceSettingsTimeoutError(error) ||
+    (error instanceof CallRequestError && error.retryable)
+  );
 }
 
 function formatVoiceSettingsError(error: unknown, fallback: string, retrying = false): string {
-  if (isLikelyFetchNetworkError(error)) {
+  if (error instanceof TypeError) {
     return retrying
       ? 'Viventium is reconnecting to the voice runtime. Retrying voice settings...'
       : 'Viventium could not reach the voice runtime for voice settings. Check the connection and retry.';
@@ -189,6 +190,7 @@ async function requestVoiceSettings(
       method,
       headers: {
         'Content-Type': 'application/json',
+        ...callBrowserCapabilityHeaders(callSessionId),
       },
       body:
         method === 'POST'
@@ -212,8 +214,13 @@ async function requestVoiceSettings(
 
   const payload = (await response.json().catch(() => ({}))) as VoiceSettingsResponse;
   if (!response.ok) {
-    throw new Error(
-      getErrorMessage(payload, `Voice settings request failed (${response.status}).`)
+    const issue = callIssueFromResponse(response.status, payload);
+    throw new CallRequestError(
+      {
+        ...issue,
+        message: getErrorMessage(payload, issue.message),
+      },
+      payload.retryable === true
     );
   }
 
@@ -240,8 +247,8 @@ export function useCallSessionVoiceSettings(
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [issue, setIssue] = useState<CallIssue | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const autoCorrectionRef = useRef<string | null>(null);
 
   const normalizedSelectionVoiceRoute = useMemo(() => {
     if (!selectionVoiceRoute) {
@@ -269,8 +276,8 @@ export function useCallSessionVoiceSettings(
       setIsLoading(false);
       setIsSaving(false);
       setError(null);
+      setIssue(null);
       setNotice(null);
-      autoCorrectionRef.current = null;
       return;
     }
 
@@ -278,9 +285,9 @@ export function useCallSessionVoiceSettings(
     let retryTimeoutId: ReturnType<typeof setTimeout> | null = null;
     setIsLoading(true);
     setError(null);
+    setIssue(null);
     setNotice(null);
     setAssistantRoute(null);
-    autoCorrectionRef.current = null;
 
     const loadVoiceSettings = (attempt: number) => {
       requestVoiceSettings('GET', callSessionId, undefined, controller.signal)
@@ -290,6 +297,7 @@ export function useCallSessionVoiceSettings(
           setSelectionVoiceRoute(normalizeSelectionRoute(payload.selectionVoiceRoute));
           setAssistantRoute(payload.assistantRoute);
           setError(null);
+          setIssue(null);
         })
         .catch((nextError) => {
           if (isAbortError(nextError)) {
@@ -299,6 +307,23 @@ export function useCallSessionVoiceSettings(
             isTransientVoiceSettingsLoadError(nextError) && attempt + 1 < INITIAL_LOAD_MAX_ATTEMPTS;
           setError(
             formatVoiceSettingsError(nextError, 'Unable to load voice settings.', shouldRetry)
+          );
+          setIssue(
+            nextError instanceof CallRequestError
+              ? { kind: nextError.code, message: nextError.message }
+              : nextError instanceof TypeError
+                ? {
+                    kind: 'gateway_down',
+                    message: formatVoiceSettingsError(
+                      nextError,
+                      'Unable to load voice settings.',
+                      shouldRetry
+                    ),
+                  }
+                : {
+                    kind: 'unknown',
+                    message: formatVoiceSettingsError(nextError, 'Unable to load voice settings.'),
+                  }
           );
           if (shouldRetry) {
             retryTimeoutId = setTimeout(() => {
@@ -324,60 +349,54 @@ export function useCallSessionVoiceSettings(
     };
   }, [callSessionId, normalizeSelectionRoute]);
 
-  useEffect(() => {
-    if (!normalizedSelectionVoiceRoute || isLoading || isSaving) {
-      return;
-    }
+  const configuredVoiceRoute = useMemo<VoiceRouteState>(
+    () => ({
+      stt: requestedVoiceRoute.stt.provider ? requestedVoiceRoute.stt : savedVoiceRoute.stt,
+      tts: requestedVoiceRoute.tts.provider ? requestedVoiceRoute.tts : savedVoiceRoute.tts,
+    }),
+    [requestedVoiceRoute, savedVoiceRoute]
+  );
 
-    const correction = autoCorrectRequestedVoiceRoute(
-      requestedVoiceRoute,
-      normalizedSelectionVoiceRoute
-    );
-    if (!correction.changed) {
-      autoCorrectionRef.current = null;
-      return;
+  const routeIssue = useMemo<CallIssue | null>(() => {
+    if (!callSessionId || isLoading || issue) {
+      return null;
     }
-
-    const correctionKey = JSON.stringify(correction.requestedVoiceRoute);
-    if (autoCorrectionRef.current === correctionKey) {
-      return;
+    if (!configuredVoiceRoute.stt.provider || !configuredVoiceRoute.tts.provider) {
+      return {
+        kind: 'no_route',
+        message: 'This call has no complete speech and voice route configured.',
+      };
     }
-    autoCorrectionRef.current = correctionKey;
-    setNotice(correction.message);
-    setRequestedVoiceRouteState(correction.requestedVoiceRoute);
-
-    if (!callSessionId) {
-      return;
+    if (!normalizedSelectionVoiceRoute) {
+      return {
+        kind: 'gateway_down',
+        message: 'Viventium could not validate the configured voice route.',
+      };
     }
-
-    setIsSaving(true);
-    setError(null);
-    requestVoiceSettings('POST', callSessionId, correction.requestedVoiceRoute)
-      .then((payload) => {
-        setRequestedVoiceRouteState(payload.requestedVoiceRoute);
-        setSavedVoiceRoute(payload.savedVoiceRoute);
-        setSelectionVoiceRoute(normalizeSelectionRoute(payload.selectionVoiceRoute));
-        setAssistantRoute(payload.assistantRoute);
-      })
-      .catch((nextError) => {
-        setError(formatVoiceSettingsError(nextError, 'Unable to save voice settings.'));
-      })
-      .finally(() => {
-        setIsSaving(false);
-      });
-  }, [
-    callSessionId,
-    isLoading,
-    isSaving,
-    normalizeSelectionRoute,
-    normalizedSelectionVoiceRoute,
-    requestedVoiceRoute,
-  ]);
+    for (const modality of ['stt', 'tts'] as const) {
+      const selection = configuredVoiceRoute[modality];
+      const capability = normalizedSelectionVoiceRoute.capabilities.find(
+        (candidate) =>
+          candidate.modality === modality &&
+          normalizeProviderName(candidate.id) === normalizeProviderName(selection.provider)
+      );
+      const variantMissing =
+        Boolean(selection.variant) &&
+        Boolean(capability?.variants.length) &&
+        !capability?.variants.some((variant) => variant.id === selection.variant);
+      if (!capability || !capability.available || variantMissing) {
+        return {
+          kind: 'provider_failure',
+          message: `The configured ${modality === 'stt' ? 'speech recognition' : 'voice'} route is unavailable.`,
+        };
+      }
+    }
+    return null;
+  }, [callSessionId, configuredVoiceRoute, isLoading, issue, normalizedSelectionVoiceRoute]);
 
   const setRequestedVoiceRoute = useCallback(
     async (nextRoute: VoiceRouteState) => {
       const normalizedRoute = normalizeVoiceRouteState(nextRoute);
-      autoCorrectionRef.current = null;
       setNotice(null);
       setRequestedVoiceRouteState(normalizedRoute);
 
@@ -387,6 +406,7 @@ export function useCallSessionVoiceSettings(
 
       setIsSaving(true);
       setError(null);
+      setIssue(null);
       try {
         const payload = await requestVoiceSettings('POST', callSessionId, normalizedRoute);
         setRequestedVoiceRouteState(payload.requestedVoiceRoute);
@@ -395,7 +415,15 @@ export function useCallSessionVoiceSettings(
         setAssistantRoute(payload.assistantRoute);
         return true;
       } catch (nextError) {
-        setError(formatVoiceSettingsError(nextError, 'Unable to save voice settings.'));
+        const message = formatVoiceSettingsError(nextError, 'Unable to save voice settings.');
+        setError(message);
+        setIssue(
+          nextError instanceof CallRequestError
+            ? { kind: nextError.code, message: nextError.message }
+            : nextError instanceof TypeError
+              ? { kind: 'gateway_down', message }
+              : { kind: 'unknown', message }
+        );
         return false;
       } finally {
         setIsSaving(false);
@@ -407,11 +435,13 @@ export function useCallSessionVoiceSettings(
   return {
     requestedVoiceRoute,
     savedVoiceRoute,
+    configuredVoiceRoute,
     selectionVoiceRoute: normalizedSelectionVoiceRoute,
     assistantRoute,
     isLoading,
     isSaving,
-    error,
+    error: error ?? routeIssue?.message ?? null,
+    issue: issue ?? routeIssue,
     notice,
     setRequestedVoiceRoute,
   };
