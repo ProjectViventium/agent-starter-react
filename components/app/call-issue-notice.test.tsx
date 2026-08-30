@@ -2,6 +2,7 @@ import React from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { CallIssueNotice } from '@/components/app/call-issue-notice';
+import { WelcomeView } from '@/components/app/welcome-view';
 import type { CallIssueKind } from '@/lib/call-start';
 
 describe('CallIssueNotice', () => {
@@ -41,5 +42,20 @@ describe('CallIssueNotice', () => {
     expect(screen.getAllByRole('button')).toHaveLength(1);
     fireEvent.click(screen.getByRole('button', { name: 'Retry recovery' }));
     expect(onRetry).toHaveBeenCalledOnce();
+  });
+
+  it('does not mislabel a durable ended call as an expired launch after refresh', () => {
+    render(
+      <WelcomeView
+        startButtonText="Call ended"
+        onStartCall={vi.fn()}
+        startDisabled
+        callEnded
+        callIssue={{ kind: 'auth_expired', message: 'The launch cannot be reused.' }}
+      />
+    );
+
+    expect(screen.getByRole('status', { name: 'Call status: ended' })).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });

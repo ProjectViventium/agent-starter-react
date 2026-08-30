@@ -8,6 +8,7 @@ import { SessionView } from '@/components/app/session-view';
 import { WelcomeView } from '@/components/app/welcome-view';
 import type { VoiceCallMode } from '@/hooks/useCallSessionState';
 import type { CallIssue } from '@/lib/call-start';
+import type { VoiceCallStatus } from '@/lib/call-state';
 
 // VIVENTIUM START
 // Purpose: Viventium agent-starter customization.
@@ -44,10 +45,12 @@ interface ViewControllerProps {
   callSessionId: string | null;
   conversationId?: string | null;
   mode?: VoiceCallMode;
+  authoritativeStatus?: VoiceCallStatus | null;
   modePending?: boolean;
   onModeChange?: (mode: VoiceCallMode) => void;
   callStateError?: string | null;
   onCallEnded?: () => void;
+  onCallEnding?: () => void;
   callIssue?: CallIssue | null;
   onRetry?: () => void;
   audioRecoveryRequired?: boolean;
@@ -64,10 +67,12 @@ export function ViewController({
   callSessionId,
   conversationId,
   mode,
+  authoritativeStatus,
   modePending,
   onModeChange,
   callStateError,
   onCallEnded,
+  onCallEnding,
   callIssue,
   onRetry,
   audioRecoveryRequired,
@@ -109,10 +114,12 @@ export function ViewController({
           callSessionId={callSessionId}
           conversationId={conversationId}
           mode={mode}
+          authoritativeStatus={authoritativeStatus}
           modePending={modePending}
           onModeChange={onModeChange}
           callStateError={callStateError}
           onCallEnded={onCallEnded}
+          onCallEnding={onCallEnding}
           callIssue={callIssue}
           onIssueRetry={onRetry}
           audioRecoveryRequired={audioRecoveryRequired}

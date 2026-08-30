@@ -64,6 +64,8 @@ const MICROPHONE_START_TIMEOUT_MS = 15_000;
 const DISPATCH_RECLAIM_AFTER_MS = 8_000;
 const DISPATCH_RECLAIM_RETRY_MS = 8_000;
 const DISPATCH_RECLAIM_MAX_ATTEMPTS = 3;
+const CALL_END_TOKEN_REUSE_MS = 30_000;
+const SAFE_CALL_SESSION_ID = /^[A-Za-z0-9._:-]{1,160}$/;
 
 type ConnectionDetailsCacheEntry = {
   promise?: Promise<ConnectionDetails>;
@@ -72,6 +74,7 @@ type ConnectionDetailsCacheEntry = {
 };
 
 const connectionDetailsCache = new Map<string, ConnectionDetailsCacheEntry>();
+const locallyEndingCallSessions = new Map<string, number>();
 const canonicalConnectionDetails = new Map<
   string,
   Pick<ConnectionDetails, 'roomName' | 'participantIdentity'>
@@ -194,7 +197,7 @@ function parseCallSessionIdFromTokenOptions(options?: AgentTokenOptions): string
       const parsed = JSON.parse(candidate) as { callSessionId?: unknown };
       if (
         typeof parsed.callSessionId === 'string' &&
-        /^[A-Za-z0-9._:-]{1,160}$/.test(parsed.callSessionId)
+        SAFE_CALL_SESSION_ID.test(parsed.callSessionId)
       ) {
         return parsed.callSessionId;
       }
@@ -203,6 +206,36 @@ function parseCallSessionIdFromTokenOptions(options?: AgentTokenOptions): string
     }
   }
   return null;
+}
+
+export function markCallSessionEndingForTokenSource(callSessionId: string): boolean {
+  const normalized = callSessionId.trim();
+  if (!SAFE_CALL_SESSION_ID.test(normalized)) {
+    return false;
+  }
+  const now = Date.now();
+  for (const [candidate, expiresAt] of locallyEndingCallSessions) {
+    if (expiresAt <= now) locallyEndingCallSessions.delete(candidate);
+  }
+  locallyEndingCallSessions.delete(normalized);
+  locallyEndingCallSessions.set(normalized, now + CALL_END_TOKEN_REUSE_MS);
+  while (locallyEndingCallSessions.size > MAX_CANONICAL_CONNECTION_SESSIONS) {
+    const oldest = locallyEndingCallSessions.keys().next();
+    if (oldest.done) break;
+    locallyEndingCallSessions.delete(oldest.value);
+  }
+  return true;
+}
+
+function callSessionIsEndingForTokenSource(callSessionId: string | null): boolean {
+  if (!callSessionId) return false;
+  const expiresAt = locallyEndingCallSessions.get(callSessionId);
+  if (!expiresAt) return false;
+  if (expiresAt <= Date.now()) {
+    locallyEndingCallSessions.delete(callSessionId);
+    return false;
+  }
+  return true;
 }
 
 async function wait(ms: number): Promise<void> {
@@ -224,7 +257,9 @@ function stableCacheStringify(value: unknown): string {
   return JSON.stringify(value) ?? 'undefined';
 }
 
-function getConnectionDetailsTokenSource(fallbackOptions?: AgentTokenOptions): TokenSourceFixed {
+export function getConnectionDetailsTokenSource(
+  fallbackOptions?: AgentTokenOptions
+): TokenSourceFixed {
   return TokenSource.literal(async (options?: AgentTokenOptions): Promise<ConnectionDetails> => {
     const mergedOptions = {
       ...(fallbackOptions ?? {}),
@@ -232,9 +267,13 @@ function getConnectionDetailsTokenSource(fallbackOptions?: AgentTokenOptions): T
     };
     const cacheKey = stableCacheStringify(mergedOptions);
     const cached = connectionDetailsCache.get(cacheKey);
+    const callSessionId = parseCallSessionIdFromTokenOptions(mergedOptions);
     if (cached) {
       if (cached.promise) {
         return cached.promise;
+      }
+      if (cached.value && callSessionIsEndingForTokenSource(callSessionId)) {
+        return cached.value;
       }
       if (cached.value && Date.now() - cached.createdAt < CONNECTION_DETAILS_CACHE_MS) {
         return cached.value;
@@ -400,6 +439,14 @@ function AppSession({
       !hasEnded &&
       (session.isConnected || session.connectionState === ConnectionState.Connecting)
   );
+
+  useEffect(() => {
+    if (callSessionState.authoritativeStatus !== 'ended' || hasEnded) {
+      return;
+    }
+    setHasEnded(true);
+    void session.end();
+  }, [callSessionState.authoritativeStatus, hasEnded, session]);
 
   useEffect(() => {
     const transition = callSessionState.lastModeTransition;
@@ -681,10 +728,16 @@ function AppSession({
           callSessionId={expectedCallSessionId}
           conversationId={expectedConversationId}
           mode={callSessionState.mode}
+          authoritativeStatus={callSessionState.authoritativeStatus}
           modePending={callSessionState.modePending}
           onModeChange={(mode) => void callSessionState.setMode(mode)}
           callStateError={callSessionState.callStateError}
           onCallEnded={() => setHasEnded(true)}
+          onCallEnding={() => {
+            if (expectedCallSessionId) {
+              markCallSessionEndingForTokenSource(expectedCallSessionId);
+            }
+          }}
           callIssue={startError ?? callSessionState.callStateIssue ?? preflightIssue}
           onRetry={() => void startCall()}
           audioRecoveryRequired={audioRecoveryRequired}
