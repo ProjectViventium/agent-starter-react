@@ -7,6 +7,7 @@ import { normalizeProxyFailure, parseCallIdentifier } from '@/lib/call-proxy';
 
 const REQUEST_FIELDS = new Set(['version', 'callSessionId', 'turnId', 'segmentIds']);
 const MAX_SEGMENT_IDS = 32;
+const NO_STORE_HEADERS = { 'Cache-Control': 'no-store' } as const;
 // Keep model classification inside the browser's 9-second and gateway's 10-second deadlines
 // without changing the shared task proxy's unrelated 4.5-second request budget.
 const CALL_ENGAGEMENT_PROXY_TIMEOUT_MS = 8_500;
@@ -21,7 +22,7 @@ type CallEngagementRequest = {
 function invalidRequest() {
   return NextResponse.json(
     { code: 'unknown', message: 'The call engagement request is invalid.', retryable: false },
-    { status: 400 }
+    { status: 400, headers: NO_STORE_HEADERS }
   );
 }
 
@@ -39,11 +40,23 @@ async function proxyCallEngagementRequest(
         message: 'The voice task runtime is not configured.',
         retryable: false,
       },
-      { status: 503 }
+      { status: 503, headers: NO_STORE_HEADERS }
     );
   }
 
-  const target = new URL('/api/viventium/voice/engagement/classify', origin);
+  let target: URL;
+  try {
+    target = new URL('/api/viventium/voice/engagement/classify', origin);
+  } catch {
+    return NextResponse.json(
+      {
+        code: 'gateway_down',
+        message: 'The voice task runtime is not configured.',
+        retryable: false,
+      },
+      { status: 503, headers: NO_STORE_HEADERS }
+    );
+  }
   const controller = new AbortController();
   const abortRequest = () => controller.abort();
   if (request.signal.aborted) {
@@ -80,7 +93,7 @@ async function proxyCallEngagementRequest(
           message: 'The voice task runtime did not respond before the request timed out.',
           retryable: true,
         },
-        { status: 504 }
+        { status: 504, headers: NO_STORE_HEADERS }
       );
     }
     return NextResponse.json(
@@ -89,7 +102,7 @@ async function proxyCallEngagementRequest(
         message: 'Viventium could not reach the voice task runtime.',
         retryable: true,
       },
-      { status: 503 }
+      { status: 503, headers: NO_STORE_HEADERS }
     );
   } finally {
     clearTimeout(timeoutId);
@@ -100,11 +113,12 @@ async function proxyCallEngagementRequest(
   if (!response.ok) {
     return NextResponse.json(normalizeProxyFailure(response.status, payload), {
       status: response.status,
+      headers: NO_STORE_HEADERS,
     });
   }
   return NextResponse.json(payload ?? {}, {
     status: response.status,
-    headers: { 'Cache-Control': 'no-store' },
+    headers: NO_STORE_HEADERS,
   });
 }
 
@@ -117,7 +131,7 @@ export async function POST(request: Request) {
         message: 'The call capability is missing or invalid.',
         retryable: false,
       },
-      { status: 401 }
+      { status: 401, headers: NO_STORE_HEADERS }
     );
   }
 

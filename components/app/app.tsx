@@ -227,6 +227,20 @@ export function markCallSessionEndingForTokenSource(callSessionId: string): bool
   return true;
 }
 
+export async function disconnectDurablyEndedCallSession(
+  callSessionId: string | null | undefined,
+  disconnect: () => Promise<void>
+): Promise<void> {
+  if (callSessionId) {
+    markCallSessionEndingForTokenSource(callSessionId);
+  }
+  try {
+    await disconnect();
+  } catch {
+    console.warn('[Viventium] Failed to disconnect a durably ended call.');
+  }
+}
+
 function callSessionIsEndingForTokenSource(callSessionId: string | null): boolean {
   if (!callSessionId) return false;
   const expiresAt = locallyEndingCallSessions.get(callSessionId);
@@ -445,8 +459,8 @@ function AppSession({
       return;
     }
     setHasEnded(true);
-    void session.end();
-  }, [callSessionState.authoritativeStatus, hasEnded, session]);
+    void disconnectDurablyEndedCallSession(expectedCallSessionId, () => session.end());
+  }, [callSessionState.authoritativeStatus, expectedCallSessionId, hasEnded, session]);
 
   useEffect(() => {
     const transition = callSessionState.lastModeTransition;

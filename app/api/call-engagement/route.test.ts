@@ -264,6 +264,24 @@ describe('call engagement classification proxy', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('fails closed when the configured Core origin is malformed', async () => {
+    process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'not a valid URL';
+    process.env.VIVENTIUM_CALL_SESSION_SECRET = 'synthetic-server-secret';
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await POST(request(validRequest, { capability: browserCapability }));
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    expect(await response.json()).toEqual({
+      code: 'gateway_down',
+      message: 'The voice task runtime is not configured.',
+      retryable: false,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('normalizes a Core connection failure without exposing credentials or internal errors', async () => {
     process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'https://librechat.example.com';
     process.env.VIVENTIUM_CALL_SESSION_SECRET = 'synthetic-server-secret';
@@ -380,6 +398,7 @@ describe('call engagement classification proxy', () => {
     const response = await POST(request(validRequest, { capability: browserCapability }));
 
     expect(response.status).toBe(403);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
     expect(await response.json()).toEqual({
       code: 'unknown',
       message: 'The speaker cannot authorize this call turn.',
