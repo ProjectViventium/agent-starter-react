@@ -51,6 +51,7 @@ type CallSessionStateResponse = {
 
 export type UseCallSessionStateResult = {
   mode: VoiceCallMode;
+  authoritativeStatus: VoiceCallStatus | null;
   modePending: boolean;
   wingModeEnabled: boolean;
   wingModePending: boolean;
@@ -65,7 +66,10 @@ export type UseCallSessionStateResult = {
   setListenOnlyModeEnabled: (enabled: boolean) => Promise<boolean>;
 };
 
-function normalizeResponse(payload: CallSessionStateResponse | null | undefined) {
+function normalizeResponse(
+  payload: CallSessionStateResponse | null | undefined,
+  expectedCallSessionId?: string
+) {
   const legacyMode: VoiceCallMode =
     payload?.listenOnlyModeEnabled === true
       ? 'listen_only'
@@ -79,6 +83,19 @@ function normalizeResponse(payload: CallSessionStateResponse | null | undefined)
       : legacyMode;
   const listenOnlyModeEnabled = mode === 'listen_only';
   const authoritativeCallState = parseVoiceCallState(payload);
+  if (
+    authoritativeCallState &&
+    expectedCallSessionId &&
+    authoritativeCallState.callSessionId !== expectedCallSessionId
+  ) {
+    throw new CallRequestError(
+      {
+        kind: 'auth_expired',
+        message: 'The call state response did not match this call session.',
+      },
+      false
+    );
+  }
   const status = authoritativeCallState?.status ?? null;
   const stateError =
     payload?.error && typeof payload.error === 'object' && !Array.isArray(payload.error)
@@ -161,7 +178,7 @@ async function requestCallSessionState(
   }
 
   const payload = (await response.json().catch(() => ({}))) as CallSessionStateResponse;
-  const normalized = normalizeResponse(payload);
+  const normalized = normalizeResponse(payload, callSessionId);
   if (!response.ok) {
     const issue = callIssueFromResponse(response.status, payload);
     throw new CallRequestError(
@@ -193,6 +210,7 @@ export function useCallSessionState(
   keepAliveEnabled: boolean
 ): UseCallSessionStateResult {
   const [mode, setModeState] = useState<VoiceCallMode>('call');
+  const [authoritativeStatus, setAuthoritativeStatus] = useState<VoiceCallStatus | null>(null);
   const [modePending, setModePending] = useState(false);
   const [wingModeEnabled, setWingModeEnabledState] = useState(false);
   const [wingModePending, setWingModePending] = useState(false);
@@ -203,9 +221,10 @@ export function useCallSessionState(
   const [callStateRetryable, setCallStateRetryable] = useState(false);
   const [lastModeTransition, setLastModeTransition] = useState<VoiceCallStateV1 | null>(null);
   const stateRequestGenerationRef = useRef(0);
-  const stateRequestsInFlightRef = useRef(0);
+  const stateRequestsInFlightRef = useRef(new Map<string, number>());
   const latestCallStatusRef = useRef<VoiceCallStatus | null>(null);
   const modeMutationPendingRef = useRef(false);
+  const modeMutationControllerRef = useRef<AbortController | null>(null);
 
   const applyState = useCallback((next: ReturnType<typeof normalizeResponse>) => {
     setModeState(next.mode);
@@ -216,6 +235,7 @@ export function useCallSessionState(
     setCallStateRetryable(next.retryable);
     if (next.authoritativeCallState) {
       latestCallStatusRef.current = next.authoritativeCallState.status;
+      setAuthoritativeStatus(next.authoritativeCallState.status);
     }
   }, []);
 
@@ -237,23 +257,31 @@ export function useCallSessionState(
       body?: Record<string, unknown>,
       signal?: AbortSignal
     ) => {
-      stateRequestsInFlightRef.current += 1;
+      stateRequestsInFlightRef.current.set(
+        currentCallSessionId,
+        (stateRequestsInFlightRef.current.get(currentCallSessionId) ?? 0) + 1
+      );
       try {
         return await requestCallSessionState(method, currentCallSessionId, body, signal);
       } finally {
-        stateRequestsInFlightRef.current = Math.max(0, stateRequestsInFlightRef.current - 1);
+        const remaining = (stateRequestsInFlightRef.current.get(currentCallSessionId) ?? 1) - 1;
+        if (remaining > 0) {
+          stateRequestsInFlightRef.current.set(currentCallSessionId, remaining);
+        } else {
+          stateRequestsInFlightRef.current.delete(currentCallSessionId);
+        }
       }
     },
     []
   );
 
   const syncState = useCallback(
-    async (body?: Record<string, unknown>) => {
+    async (body?: Record<string, unknown>, signal?: AbortSignal) => {
       if (!callSessionId) {
         return null;
       }
       const requestGeneration = beginStateRequest();
-      const next = await performStateRequest(body ? 'POST' : 'GET', callSessionId, body);
+      const next = await performStateRequest(body ? 'POST' : 'GET', callSessionId, body, signal);
       if (!shouldApplyStateResponse(requestGeneration)) {
         return null;
       }
@@ -264,27 +292,38 @@ export function useCallSessionState(
   );
 
   useEffect(() => {
+    return () => {
+      modeMutationControllerRef.current?.abort();
+      modeMutationControllerRef.current = null;
+      modeMutationPendingRef.current = false;
+    };
+  }, [callSessionId]);
+
+  useEffect(() => {
+    setModeState('call');
+    setAuthoritativeStatus(null);
+    setModePending(false);
+    setWingModeEnabledState(false);
+    setWingModePending(false);
+    setListenOnlyModeEnabledState(false);
+    setListenOnlyModePending(false);
+    setCallStateError(null);
+    setCallStateIssue(null);
+    setCallStateRetryable(false);
+    setLastModeTransition(null);
+    latestCallStatusRef.current = null;
     if (!callSessionId) {
-      setModeState('call');
-      setModePending(false);
-      setWingModeEnabledState(false);
-      setWingModePending(false);
-      setListenOnlyModeEnabledState(false);
-      setListenOnlyModePending(false);
-      setCallStateError(null);
-      setCallStateIssue(null);
-      setCallStateRetryable(false);
-      setLastModeTransition(null);
-      latestCallStatusRef.current = null;
       return;
     }
 
-    latestCallStatusRef.current = null;
     let cancelled = false;
     let retryTimeoutId: ReturnType<typeof setTimeout> | null = null;
     const controller = new AbortController();
     const loadState = (attempt: number) => {
-      if (stateRequestsInFlightRef.current > 0 || modeMutationPendingRef.current) {
+      if (
+        (stateRequestsInFlightRef.current.get(callSessionId) ?? 0) > 0 ||
+        modeMutationPendingRef.current
+      ) {
         retryTimeoutId = setTimeout(() => {
           retryTimeoutId = null;
           loadState(attempt);
@@ -384,7 +423,10 @@ export function useCallSessionState(
       if (startup && startupSettled()) {
         return;
       }
-      if (stateRequestsInFlightRef.current > 0 || modeMutationPendingRef.current) {
+      if (
+        (stateRequestsInFlightRef.current.get(callSessionId) ?? 0) > 0 ||
+        modeMutationPendingRef.current
+      ) {
         if (startup) {
           scheduleStartupTick();
         }
@@ -468,18 +510,27 @@ export function useCallSessionState(
       setWingModePending(nextMode === 'wing' || mode === 'wing');
       setListenOnlyModePending(nextMode === 'listen_only' || mode === 'listen_only');
       modeMutationPendingRef.current = true;
+      modeMutationControllerRef.current?.abort();
+      const controller = new AbortController();
+      modeMutationControllerRef.current = controller;
       try {
-        const next = await syncState({
-          touch: true,
-          mode: nextMode,
-          wingModeEnabled: nextMode === 'wing',
-          listenOnlyModeEnabled: nextMode === 'listen_only',
-        });
+        const next = await syncState(
+          {
+            touch: true,
+            mode: nextMode,
+            wingModeEnabled: nextMode === 'wing',
+            listenOnlyModeEnabled: nextMode === 'listen_only',
+          },
+          controller.signal
+        );
         if (next?.mode === nextMode && next.authoritativeCallState?.mode === nextMode) {
           setLastModeTransition(next.authoritativeCallState);
         }
         return next?.mode === nextMode;
       } catch (error) {
+        if (isAbortError(error)) {
+          return false;
+        }
         const message = formatCallSessionStateError(error, 'Call mode update failed.');
         setCallStateError(message);
         setCallStateIssue(
@@ -494,10 +545,13 @@ export function useCallSessionState(
         );
         return false;
       } finally {
-        modeMutationPendingRef.current = false;
-        setModePending(false);
-        setWingModePending(false);
-        setListenOnlyModePending(false);
+        if (modeMutationControllerRef.current === controller) {
+          modeMutationControllerRef.current = null;
+          modeMutationPendingRef.current = false;
+          setModePending(false);
+          setWingModePending(false);
+          setListenOnlyModePending(false);
+        }
       }
     },
     [callSessionId, mode, syncState]
@@ -517,6 +571,7 @@ export function useCallSessionState(
 
   return {
     mode,
+    authoritativeStatus,
     modePending,
     wingModeEnabled,
     wingModePending,

@@ -1,3 +1,4 @@
+import React from 'react';
 import { CallIssueNotice } from '@/components/app/call-issue-notice';
 import { CallStatusIndicator } from '@/components/app/call-mode-control';
 import { Button } from '@/components/livekit/button';
@@ -69,7 +70,9 @@ export const WelcomeView = ({
           <p className="text-muted-foreground mt-4 max-w-md text-sm leading-6">{helperText}</p>
         ) : null}
 
-        {callIssue ? (
+        {/* A durable terminal state is authoritative after refresh. Do not overlay a stale
+         * launch or voice-settings error on a call that is already confirmed ended. */}
+        {callIssue && !callEnded ? (
           <div className="mt-4 w-full max-w-md">
             <CallIssueNotice issue={callIssue} onRetry={onRetry} />
           </div>

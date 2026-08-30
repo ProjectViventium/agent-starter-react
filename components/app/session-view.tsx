@@ -29,7 +29,9 @@ import { useCallTaskActions } from '@/hooks/useCallTaskActions';
 import { useMicrophoneHealth } from '@/hooks/useMicrophoneHealth';
 import { useViventiumSessionMessages } from '@/hooks/useViventiumSessionMessages';
 import { useViventiumVoiceEvents } from '@/hooks/useViventiumVoiceEvents';
+import { useWingEngagement } from '@/hooks/useWingEngagement';
 import type { CallIssue } from '@/lib/call-start';
+import type { VoiceCallStatus } from '@/lib/call-state';
 import { cn } from '@/lib/utils';
 import { Button } from '../livekit/button';
 import { ScrollArea } from '../livekit/scroll-area/scroll-area';
@@ -81,10 +83,12 @@ interface SessionViewProps {
   callSessionId: string | null;
   conversationId?: string | null;
   mode?: VoiceCallMode;
+  authoritativeStatus?: VoiceCallStatus | null;
   modePending?: boolean;
   onModeChange?: (mode: VoiceCallMode) => void;
   callStateError?: string | null;
   onCallEnded?: () => void;
+  onCallEnding?: () => void;
   audioRecoveryRequired?: boolean;
   onAudioRecovery?: () => void;
   callIssue?: CallIssue | null;
@@ -96,10 +100,12 @@ export const SessionView = ({
   callSessionId,
   conversationId = null,
   mode = 'call',
+  authoritativeStatus = null,
   modePending = false,
   onModeChange,
   callStateError,
   onCallEnded,
+  onCallEnding,
   audioRecoveryRequired = false,
   onAudioRecovery,
   callIssue,
@@ -132,7 +138,15 @@ export const SessionView = ({
     hasNewerSpeakers,
     loadingNewerSpeakers,
     loadNewerSpeakers,
+    stopRecovery,
   } = useViventiumVoiceEvents(session, callSessionId, agentIdentities);
+  useWingEngagement({
+    session,
+    callSessionId,
+    mode,
+    modePending,
+    speakerSegment: latestSpeakerSegment,
+  });
   const taskActions = useCallTaskActions(callSessionId, applyAuthoritativeTaskEvent);
   const notifyLinkedChat = useCallResultBridge({ callSessionId, conversationId, tasks });
   const handleEnded = React.useCallback(() => {
@@ -155,19 +169,38 @@ export const SessionView = ({
   const activeTask = tasks.find((task) =>
     ['queued', 'running', 'recovering', 'cancelling', 'needs_input'].includes(task.state)
   );
-  const callStatus: AccessibleCallStatus = callStateError
-    ? 'degraded'
-    : activeTask?.state === 'needs_input'
+  const authoritativeAccessibleStatus: AccessibleCallStatus =
+    authoritativeStatus === 'needs_input'
       ? 'needs input'
-      : activeTask
-        ? 'working'
-        : agent.state === 'speaking'
-          ? 'speaking'
-          : agent.state === 'listening'
-            ? 'listening'
-            : agent.state === 'failed'
-              ? 'failed'
-              : 'connecting';
+      : authoritativeStatus === 'listening' ||
+          authoritativeStatus === 'speaking' ||
+          authoritativeStatus === 'working' ||
+          authoritativeStatus === 'degraded' ||
+          authoritativeStatus === 'failed' ||
+          authoritativeStatus === 'ended'
+        ? authoritativeStatus
+        : 'connecting';
+  const durableTerminalStatus =
+    authoritativeAccessibleStatus === 'degraded' ||
+    authoritativeAccessibleStatus === 'failed' ||
+    authoritativeAccessibleStatus === 'ended'
+      ? authoritativeAccessibleStatus
+      : null;
+  const callStatus: AccessibleCallStatus = durableTerminalStatus
+    ? durableTerminalStatus
+    : agent.state === 'speaking'
+      ? 'speaking'
+      : activeTask?.state === 'needs_input' || authoritativeAccessibleStatus === 'needs input'
+        ? 'needs input'
+        : callStateError
+          ? 'degraded'
+          : activeTask || authoritativeAccessibleStatus === 'working'
+            ? 'working'
+            : agent.state === 'listening'
+              ? 'listening'
+              : agent.state === 'failed'
+                ? 'failed'
+                : authoritativeAccessibleStatus;
 
   const controls: ControlBarControls = {
     leave: true,
@@ -284,6 +317,8 @@ export const SessionView = ({
             controls={controls}
             isConnected={session.isConnected}
             onDisconnect={() => {
+              onCallEnding?.();
+              stopRecovery();
               endCall(() => session.end());
             }}
             onChatOpenChange={setChatOpen}

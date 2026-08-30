@@ -237,10 +237,16 @@ export function useViventiumVoiceEvents(
   const applyTaskEventRef = React.useRef<((event: VoiceTaskEventV1) => void) | null>(null);
   const loadOlderSpeakersRef = React.useRef<(() => void) | null>(null);
   const loadNewerSpeakersRef = React.useRef<(() => void) | null>(null);
+  const stopRecoveryRef = React.useRef<(() => void) | null>(null);
+  const stoppedCallSessionIdRef = React.useRef<string | null>(null);
   const browsingOlderRef = React.useRef(false);
   const pendingNewerSegmentsRef = React.useRef(new Map<string, SpeakerSegmentV1>());
 
   React.useEffect(() => {
+    if (!callSessionId || stoppedCallSessionIdRef.current === callSessionId) {
+      stopRecoveryRef.current = null;
+      return;
+    }
     const store = createBoundedVoiceEventStore();
     const decoder = new TextDecoder();
     const handleDataReceived = (
@@ -289,6 +295,7 @@ export function useViventiumVoiceEvents(
     let olderCursor: { beforeSequence: number; beforeSegmentId: string } | null = null;
     let newerCursor: { afterSequence: number; afterSegmentId: string } | null = null;
     let speakerRequestRunning = false;
+    const pendingNewerSegments = pendingNewerSegmentsRef.current;
 
     const loadOlderSpeakers = async () => {
       if (!callSessionId || !olderCursor || speakerRequestRunning || disposed) return;
@@ -438,7 +445,7 @@ export function useViventiumVoiceEvents(
       }
     };
     const loadSnapshot = async () => {
-      if (!callSessionId) {
+      if (!callSessionId || disposed) {
         return;
       }
       snapshotController?.abort();
@@ -559,6 +566,19 @@ export function useViventiumVoiceEvents(
     const handleReconnected = () => {
       void loadSnapshot();
     };
+    const stopRecovery = () => {
+      if (disposed) return;
+      disposed = true;
+      snapshotController?.abort();
+      olderController?.abort();
+      loadSnapshotRef.current = null;
+      applyTaskEventRef.current = null;
+      loadOlderSpeakersRef.current = null;
+      loadNewerSpeakersRef.current = null;
+      room.off(RoomEvent.DataReceived, handleDataReceived);
+      room.off(RoomEvent.Reconnected, handleReconnected);
+    };
+    stopRecoveryRef.current = stopRecovery;
     loadSnapshotRef.current = () => void loadSnapshot();
     applyTaskEventRef.current = (event) => {
       if (event.callSessionId !== callSessionId) return;
@@ -574,15 +594,8 @@ export function useViventiumVoiceEvents(
     void loadSnapshot();
 
     return () => {
-      disposed = true;
-      snapshotController?.abort();
-      olderController?.abort();
-      loadSnapshotRef.current = null;
-      applyTaskEventRef.current = null;
-      loadOlderSpeakersRef.current = null;
-      loadNewerSpeakersRef.current = null;
-      room.off(RoomEvent.DataReceived, handleDataReceived);
-      room.off(RoomEvent.Reconnected, handleReconnected);
+      stopRecovery();
+      if (stopRecoveryRef.current === stopRecovery) stopRecoveryRef.current = null;
       setTasks([]);
       setSpeakerSegments([]);
       setLatestSpeakerSegment(null);
@@ -593,7 +606,7 @@ export function useViventiumVoiceEvents(
       setHasNewerSpeakers(false);
       setLoadingNewerSpeakers(false);
       browsingOlderRef.current = false;
-      pendingNewerSegmentsRef.current.clear();
+      pendingNewerSegments.clear();
     };
   }, [callSessionId, expectedAgentIdentities, room]);
 
@@ -604,6 +617,10 @@ export function useViventiumVoiceEvents(
   );
   const loadOlderSpeakers = React.useCallback(() => loadOlderSpeakersRef.current?.(), []);
   const loadNewerSpeakers = React.useCallback(() => loadNewerSpeakersRef.current?.(), []);
+  const stopRecovery = React.useCallback(() => {
+    stoppedCallSessionIdRef.current = callSessionId;
+    stopRecoveryRef.current?.();
+  }, [callSessionId]);
 
   return React.useMemo(
     () => ({
@@ -620,6 +637,7 @@ export function useViventiumVoiceEvents(
       hasNewerSpeakers,
       loadingNewerSpeakers,
       loadNewerSpeakers,
+      stopRecovery,
     }),
     [
       hasOlderSpeakers,
@@ -627,6 +645,7 @@ export function useViventiumVoiceEvents(
       latestSpeakerSegment,
       loadOlderSpeakers,
       loadNewerSpeakers,
+      stopRecovery,
       loadingOlderSpeakers,
       loadingNewerSpeakers,
       recoveryIssue,

@@ -293,6 +293,33 @@ describe('useViventiumVoiceEvents', () => {
     );
   });
 
+  it('stops reconnect recovery synchronously before an intentional call end', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ version: 1, events: [], segments: [] }), { status: 200 })
+        )
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const { handlers, session } = fakeSession();
+    const { result, rerender } = renderHook(
+      ({ identities }) => useViventiumVoiceEvents(session, 'call-1', identities),
+      { initialProps: { identities: expectedAgentIdentities } }
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    fetchMock.mockClear();
+
+    act(() => result.current.stopRecovery());
+    rerender({ identities: ['agent-2'] });
+    await act(async () => {
+      handlers.get(RoomEvent.Reconnected)?.();
+      await Promise.resolve();
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('rejects cross-session and oversized speaker snapshots without erasing live state', async () => {
     const fetchMock = vi.fn().mockImplementation((url: string) =>
       Promise.resolve(

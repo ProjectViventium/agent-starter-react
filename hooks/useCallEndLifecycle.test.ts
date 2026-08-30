@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { endCallSessionWithRetry } from '@/hooks/useCallEndLifecycle';
 
 describe('endCallSessionWithRetry', () => {
-  it('keeps capability authority through a transient failure and clears only after ended', async () => {
+  it('keeps capability authority through transient failure and confirmed end for refresh truth', async () => {
     const fetchImpl = vi
       .fn()
       .mockResolvedValueOnce(new Response('{}', { status: 503 }))
@@ -17,7 +17,7 @@ describe('endCallSessionWithRetry', () => {
       })
     ).resolves.toBe(true);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(clearCapability).toHaveBeenCalledTimes(1);
+    expect(clearCapability).not.toHaveBeenCalled();
   });
 
   it('treats terminal 410 as ended and does not retry', async () => {

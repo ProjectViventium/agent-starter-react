@@ -5,7 +5,7 @@ import { endCallSessionWithRetry, useCallEndLifecycle } from '@/hooks/useCallEnd
 afterEach(() => vi.unstubAllGlobals());
 
 describe('useCallEndLifecycle', () => {
-  it('ends audio first, sends one nonblocking ended transition, and preserves refresh recovery', () => {
+  it('begins one durable ended transition before audio teardown and preserves refresh recovery', async () => {
     const fetchMock = vi.fn(() => new Promise<Response>(() => undefined));
     vi.stubGlobal('fetch', fetchMock);
     const onEnded = vi.fn();
@@ -14,11 +14,15 @@ describe('useCallEndLifecycle', () => {
       useCallEndLifecycle({ callSessionId: 'call-1', onEnded })
     );
 
-    act(() => result.current(endAudio));
+    await act(async () => {
+      result.current(endAudio);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     expect(endAudio).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(endAudio.mock.invocationCallOrder[0]).toBeLessThan(
-      fetchMock.mock.invocationCallOrder[0]
+    expect(fetchMock.mock.invocationCallOrder[0]).toBeLessThan(
+      endAudio.mock.invocationCallOrder[0]
     );
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/call-session-state',
@@ -36,8 +40,28 @@ describe('useCallEndLifecycle', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('does not delay or duplicate the ended transition when local disconnect remains pending', async () => {
+    const disconnectPending = new Promise<void>(() => undefined);
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+    const onEnded = vi.fn();
+    const endAudio = vi.fn().mockReturnValue(disconnectPending);
+    const { result } = renderHook(() =>
+      useCallEndLifecycle({ callSessionId: 'call-race', onEnded })
+    );
+
+    await act(async () => {
+      result.current(endAudio);
+      result.current(endAudio);
+      await Promise.resolve();
+    });
+    expect(endAudio).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(onEnded).toHaveBeenCalledTimes(1);
+  });
+
   it.each([200, 410])(
-    'retries a locally timed-out end request and clears only after authoritative %s',
+    'retries a locally timed-out end request and handles authoritative %s without losing refresh truth',
     async (terminalStatus) => {
       const clearCapability = vi.fn();
       const fetchImpl = vi
@@ -63,7 +87,7 @@ describe('useCallEndLifecycle', () => {
         })
       ).resolves.toBe(true);
       expect(fetchImpl).toHaveBeenCalledTimes(2);
-      expect(clearCapability).toHaveBeenCalledTimes(1);
+      expect(clearCapability).toHaveBeenCalledTimes(terminalStatus === 410 ? 1 : 0);
     }
   );
 });

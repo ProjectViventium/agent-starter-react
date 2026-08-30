@@ -42,7 +42,12 @@ export async function endCallSessionWithRetry(
         keepalive: true,
         signal: attemptController.signal,
       });
-      if (response.ok || response.status === 410) {
+      // Keep the bounded call capability after a confirmed end so refresh can render the durable
+      // terminal state. Clear only a bearer the server has already rejected as terminal.
+      if (response.ok) {
+        return true;
+      }
+      if (response.status === 410) {
         clearCapability();
         return true;
       }
@@ -64,6 +69,7 @@ export function useCallEndLifecycle({
   onEnded: () => void;
 }) {
   const endedTransitionSentRef = React.useRef(false);
+  const endingRef = React.useRef(false);
 
   const markEnded = React.useCallback(() => {
     if (!callSessionId || endedTransitionSentRef.current) {
@@ -81,8 +87,16 @@ export function useCallEndLifecycle({
 
   return React.useCallback(
     (endAudio: () => Promise<unknown>) => {
-      void endAudio().catch(() => undefined);
+      if (endingRef.current) {
+        return;
+      }
+      endingRef.current = true;
+      // Start the durable terminal transition before tearing down the room. This lets the bound
+      // worker observe `ended`, while the transport still closes without waiting on the network.
       notifyEnded();
+      void Promise.resolve()
+        .then(endAudio)
+        .catch(() => undefined);
     },
     [notifyEnded]
   );

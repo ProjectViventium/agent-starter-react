@@ -62,6 +62,7 @@ describe('useCallSessionState mode contract', () => {
     });
 
     expect(result.current.mode).toBe('listen_only');
+    expect(result.current.authoritativeStatus).toBe('listening');
     expect(result.current.lastModeTransition).toMatchObject({
       callSessionId: 'call-1',
       mode: 'listen_only',
@@ -115,6 +116,172 @@ describe('useCallSessionState mode contract', () => {
     });
     expect(result.current.mode).toBe('wing');
     expect(result.current.lastModeTransition?.revision).toBe(2);
+  });
+
+  it('aborts an obsolete mode mutation without showing a false call error', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          version: 1,
+          callSessionId: 'call-mode-race',
+          mode: 'call',
+          status: 'listening',
+          revision: 1,
+          updatedAt: '2026-08-09T12:00:00.000Z',
+        })
+      )
+      .mockImplementationOnce(
+        (_url: string, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('Aborted', 'AbortError'))
+            );
+          })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          version: 1,
+          callSessionId: 'call-mode-race',
+          mode: 'listen_only',
+          status: 'listening',
+          revision: 2,
+          updatedAt: '2026-08-09T12:00:01.000Z',
+        })
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const { result } = renderHook(() => useCallSessionState('call-mode-race', false));
+    await waitFor(() => expect(result.current.authoritativeStatus).toBe('listening'));
+
+    let obsoleteResult: boolean | undefined;
+    let currentResult: boolean | undefined;
+    await act(async () => {
+      const obsolete = result.current.setMode('wing').then((value) => {
+        obsoleteResult = value;
+      });
+      const current = result.current.setMode('listen_only').then((value) => {
+        currentResult = value;
+      });
+      await Promise.all([obsolete, current]);
+    });
+
+    expect(obsoleteResult).toBe(false);
+    expect(currentResult).toBe(true);
+    expect(result.current.mode).toBe('listen_only');
+    expect(result.current.callStateIssue).toBeNull();
+    expect(result.current.callStateError).toBeNull();
+  });
+
+  it('keeps the current mode mutation pending after an obsolete mutation aborts', async () => {
+    const currentMutation = deferred<Response>();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          version: 1,
+          callSessionId: 'call-mode-pending-race',
+          mode: 'call',
+          status: 'listening',
+          revision: 1,
+          updatedAt: '2026-08-09T12:00:00.000Z',
+        })
+      )
+      .mockImplementationOnce(
+        (_url: string, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('Aborted', 'AbortError'))
+            );
+          })
+      )
+      .mockImplementationOnce(() => currentMutation.promise);
+    vi.stubGlobal('fetch', fetchMock);
+    const { result } = renderHook(() => useCallSessionState('call-mode-pending-race', false));
+    await waitFor(() => expect(result.current.authoritativeStatus).toBe('listening'));
+
+    let obsolete!: Promise<boolean>;
+    let current!: Promise<boolean>;
+    act(() => {
+      obsolete = result.current.setMode('wing');
+      current = result.current.setMode('listen_only');
+    });
+    await act(async () => {
+      await expect(obsolete).resolves.toBe(false);
+    });
+
+    expect(result.current.modePending).toBe(true);
+    expect(result.current.listenOnlyModePending).toBe(true);
+
+    currentMutation.resolve(
+      jsonResponse({
+        version: 1,
+        callSessionId: 'call-mode-pending-race',
+        mode: 'listen_only',
+        status: 'listening',
+        revision: 2,
+        updatedAt: '2026-08-09T12:00:01.000Z',
+      })
+    );
+    await act(async () => {
+      await expect(current).resolves.toBe(true);
+    });
+    expect(result.current.modePending).toBe(false);
+    expect(result.current.mode).toBe('listen_only');
+  });
+
+  it('clears a pending mode mutation when the active call session changes', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          version: 1,
+          callSessionId: 'call-old',
+          mode: 'wing',
+          status: 'listening',
+          revision: 1,
+          updatedAt: '2026-08-09T12:00:00.000Z',
+        })
+      )
+      .mockImplementationOnce(
+        (_url: string, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('Aborted', 'AbortError'))
+            );
+          })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          version: 1,
+          callSessionId: 'call-new',
+          mode: 'call',
+          status: 'listening',
+          revision: 1,
+          updatedAt: '2026-08-09T12:00:01.000Z',
+        })
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const { result, rerender } = renderHook(
+      ({ callSessionId }) => useCallSessionState(callSessionId, false),
+      { initialProps: { callSessionId: 'call-old' } }
+    );
+    await waitFor(() => expect(result.current.mode).toBe('wing'));
+
+    let oldMutation!: Promise<boolean>;
+    act(() => {
+      oldMutation = result.current.setMode('listen_only');
+    });
+    expect(result.current.modePending).toBe(true);
+
+    rerender({ callSessionId: 'call-new' });
+
+    await act(async () => {
+      await expect(oldMutation).resolves.toBe(false);
+    });
+    await waitFor(() => expect(result.current.authoritativeStatus).toBe('listening'));
+    expect(result.current.mode).toBe('call');
+    expect(result.current.modePending).toBe(false);
+    expect(result.current.listenOnlyModePending).toBe(false);
   });
 
   it('carries exact structured failures without guessing from message text', async () => {
@@ -202,6 +369,28 @@ describe('useCallSessionState mode contract', () => {
     expect(result.current.callStateIssue).toBeNull();
     expect(result.current.callStateError).toBeNull();
     expect(result.current.callStateRetryable).toBe(false);
+  });
+
+  it('rejects a state response owned by a different call session', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(
+        jsonResponse({
+          version: 1,
+          callSessionId: 'call-other',
+          mode: 'wing',
+          status: 'listening',
+          revision: 4,
+          updatedAt: '2026-08-09T12:00:00.000Z',
+        })
+      )
+    );
+
+    const { result } = renderHook(() => useCallSessionState('call-expected', false));
+
+    await waitFor(() => expect(result.current.callStateIssue?.kind).toBe('auth_expired'));
+    expect(result.current.mode).toBe('call');
+    expect(result.current.authoritativeStatus).toBeNull();
   });
 
   it('reconciles startup health after one second and stops when provider state settles', async () => {
