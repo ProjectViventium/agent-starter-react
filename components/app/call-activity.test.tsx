@@ -126,9 +126,9 @@ describe('CallActivity', () => {
   it('briefly shows terminal state and then dismisses the compact card', () => {
     vi.useFakeTimers();
     render(<CallActivity tasks={[view({ state: 'completed', type: 'result' })]} />);
-    expect(screen.getByText('completed')).toBeVisible();
+    expect(screen.getByText('Done')).toBeVisible();
     act(() => vi.advanceTimersByTime(8_001));
-    expect(screen.queryByText('completed')).not.toBeInTheDocument();
+    expect(screen.queryByText('Done')).not.toBeInTheDocument();
     vi.useRealTimers();
   });
 

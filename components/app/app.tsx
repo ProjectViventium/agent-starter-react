@@ -13,6 +13,7 @@ import type { AppConfig } from '@/app-config';
 import { ViewController } from '@/components/app/view-controller';
 import { WelcomeView } from '@/components/app/welcome-view';
 import { Toaster } from '@/components/livekit/toaster';
+import { VoiceAudioPlaybackEvidence } from '@/components/livekit/voice-audio-playback-evidence';
 import { useAgentErrors } from '@/hooks/useAgentErrors';
 import { useCallSessionState } from '@/hooks/useCallSessionState';
 import { useCallSessionVoiceSettings } from '@/hooks/useCallSessionVoiceSettings';
@@ -759,7 +760,9 @@ function AppSession({
           callEnded={hasEnded}
         />
       </main>
-      <RoomAudioRenderer />
+      <VoiceAudioPlaybackEvidence resetKey={expectedCallSessionId ?? ''}>
+        <RoomAudioRenderer />
+      </VoiceAudioPlaybackEvidence>
       <Toaster />
     </SessionProvider>
   );
