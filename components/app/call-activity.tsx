@@ -9,6 +9,7 @@ import type {
   SpeakerSegmentV1,
   VoiceTaskEventV1,
   VoiceTaskSource,
+  VoiceTaskState,
   VoiceTaskView,
 } from '@/lib/voice-events';
 
@@ -29,8 +30,26 @@ function sourceHref(source: VoiceTaskSource | undefined): string | null {
   }
 }
 
+const TASK_STATE_LABELS: Record<VoiceTaskState, string> = {
+  queued: 'Queued',
+  running: 'Working',
+  needs_input: 'Needs your input',
+  recovering: 'Recovering',
+  cancelling: 'Stopping',
+  completed: 'Done',
+  failed: 'Failed',
+  cancelled_confirmed: 'Stopped',
+  cancelled_unenforceable: 'Stop not confirmed',
+};
+
+function taskPhase(task: VoiceTaskEventV1) {
+  return task.phase && !Object.hasOwn(TASK_STATE_LABELS, task.phase)
+    ? task.phase
+    : TASK_STATE_LABELS[task.state];
+}
+
 function taskLabel(task: VoiceTaskEventV1) {
-  return task.label || task.phase || 'Active task';
+  return task.label || taskPhase(task);
 }
 
 function TaskItem({
@@ -49,7 +68,7 @@ function TaskItem({
   const [input, setInput] = React.useState('');
   const label = taskLabel(task);
   const progress = task.progress;
-  const statusLabel = task.state.replaceAll('_', ' ');
+  const statusLabel = TASK_STATE_LABELS[task.state];
 
   return (
     <li className="border-border/70 flex min-w-0 flex-col gap-2 border-b py-2 last:border-0">
@@ -57,7 +76,7 @@ function TaskItem({
         <div className="min-w-0">
           <p className="truncate text-sm font-semibold">{label}</p>
           <p className="text-muted-foreground text-xs leading-5">
-            {task.phase || statusLabel}
+            {taskPhase(task)}
             {progress ? (
               <span>
                 {' · '}
@@ -211,7 +230,7 @@ export function CallActivity({
       const progress = task.progress
         ? ` ${task.progress.current} of ${task.progress.total}${task.progress.unit ? ` ${task.progress.unit}` : ''}`
         : '';
-      return `${taskLabel(task)} ${task.phase || task.state.replaceAll('_', ' ')}${progress}`;
+      return `${taskLabel(task)} ${taskPhase(task)}${progress}`;
     })
     .join('. ');
 
