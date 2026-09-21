@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { motion, useReducedMotion } from 'motion/react';
+import { type HTMLMotionProps, motion, useReducedMotion } from 'motion/react';
 import { useAgent, useRemoteParticipants, useSessionContext } from '@livekit/components-react';
 import type { AppConfig } from '@/app-config';
 import {
@@ -57,7 +57,7 @@ const BOTTOM_VIEW_MOTION_PROPS = {
     delay: 0.5,
     ease: 'easeOut',
   },
-};
+} satisfies HTMLMotionProps<'div'>;
 
 interface FadeProps {
   top?: boolean;
