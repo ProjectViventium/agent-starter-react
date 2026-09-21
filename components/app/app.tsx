@@ -10,13 +10,24 @@ import {
 } from 'livekit-client';
 import { RoomAudioRenderer, SessionProvider, useSession } from '@livekit/components-react';
 import type { AppConfig } from '@/app-config';
+// VIVENTIUM START: Keep per-call voice route settings visible across the call lifecycle.
+import {
+  AdvancedVoiceSettings,
+  ConnectedAdvancedVoiceSettings,
+} from '@/components/app/advanced-voice-settings';
+// VIVENTIUM END
 import { ViewController } from '@/components/app/view-controller';
 import { WelcomeView } from '@/components/app/welcome-view';
 import { Toaster } from '@/components/livekit/toaster';
 import { VoiceAudioPlaybackEvidence } from '@/components/livekit/voice-audio-playback-evidence';
 import { useAgentErrors } from '@/hooks/useAgentErrors';
 import { useCallSessionState } from '@/hooks/useCallSessionState';
-import { useCallSessionVoiceSettings } from '@/hooks/useCallSessionVoiceSettings';
+// VIVENTIUM START: Share the exact loaded settings with the connected call surface.
+import {
+  type UseCallSessionVoiceSettingsResult,
+  useCallSessionVoiceSettings,
+} from '@/hooks/useCallSessionVoiceSettings';
+// VIVENTIUM END
 import { useConnectionRecovery } from '@/hooks/useConnectionRecovery';
 import { useDebugMode } from '@/hooks/useDebug';
 import { buildFallbackVoiceRoute } from '@/hooks/useVoiceRoute';
@@ -403,6 +414,9 @@ type AppSessionProps = {
   startButtonText?: string;
   preflightIssue?: CallIssue | null;
   appConfig: AppConfig;
+  // VIVENTIUM START: Preserve the same per-call settings object after auto-connect.
+  voiceSettings: UseCallSessionVoiceSettingsResult;
+  // VIVENTIUM END
 };
 
 function AppSession({
@@ -417,6 +431,9 @@ function AppSession({
   startButtonText,
   preflightIssue,
   appConfig,
+  // VIVENTIUM START: Render the exact preflight settings inside SessionProvider.
+  voiceSettings,
+  // VIVENTIUM END
 }: AppSessionProps) {
   const [hasAutoStarted, setHasAutoStarted] = useState(false);
   const [isStartInProgress, setIsStartInProgress] = useState(autoConnect && canStartCall);
@@ -760,6 +777,15 @@ function AppSession({
           callEnded={hasEnded}
         />
       </main>
+      {/* VIVENTIUM START: Normal deep links auto-connect, so keep settings in the live surface. */}
+      {expectedCallSessionId && (
+        <ConnectedAdvancedVoiceSettings
+          appConfig={appConfig}
+          settings={voiceSettings}
+          ended={hasEnded}
+        />
+      )}
+      {/* VIVENTIUM END */}
       <VoiceAudioPlaybackEvidence resetKey={expectedCallSessionId ?? ''}>
         <RoomAudioRenderer />
       </VoiceAudioPlaybackEvidence>
@@ -883,6 +909,9 @@ export function App({ appConfig }: AppProps) {
             helperText={preflightIssue ? undefined : startHint}
             callIssue={preflightIssue}
           />
+          {/* VIVENTIUM START: Allow route selection before a manually started call. */}
+          {expectedCallSessionId && <AdvancedVoiceSettings settings={voiceSettings} />}
+          {/* VIVENTIUM END */}
         </main>
         <Toaster />
       </>
@@ -890,18 +919,23 @@ export function App({ appConfig }: AppProps) {
   }
 
   return (
-    <AppSession
-      tokenSource={tokenSource}
-      tokenOptions={effectiveTokenOptions}
-      autoConnect={autoConnect || sessionRequested}
-      expectedRoomName={expectedRoomName}
-      expectedCallSessionId={expectedCallSessionId}
-      expectedConversationId={expectedConversationId}
-      canStartCall={canStartCall}
-      startHint={startHint}
-      startButtonText={startButtonText}
-      preflightIssue={preflightIssue}
-      appConfig={appConfig}
-    />
+    <>
+      {/* VIVENTIUM START: Carry preflight route settings into the connected call. */}
+      <AppSession
+        tokenSource={tokenSource}
+        tokenOptions={effectiveTokenOptions}
+        autoConnect={autoConnect || sessionRequested}
+        expectedRoomName={expectedRoomName}
+        expectedCallSessionId={expectedCallSessionId}
+        expectedConversationId={expectedConversationId}
+        canStartCall={canStartCall}
+        startHint={startHint}
+        startButtonText={startButtonText}
+        preflightIssue={preflightIssue}
+        appConfig={appConfig}
+        voiceSettings={voiceSettings}
+      />
+      {/* VIVENTIUM END */}
+    </>
   );
 }

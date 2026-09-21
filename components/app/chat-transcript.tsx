@@ -1,6 +1,6 @@
 'use client';
 
-import { AnimatePresence, type HTMLMotionProps, motion } from 'motion/react';
+import { AnimatePresence, type HTMLMotionProps, type Variants, motion } from 'motion/react';
 import { type ReceivedMessage } from '@livekit/components-react';
 import { ChatEntry } from '@/components/livekit/chat-entry';
 // === VIVENTIUM START ===
@@ -34,7 +34,7 @@ const CONTAINER_MOTION_PROPS = {
         delay: 0.2,
         ease: 'easeOut',
         duration: 0.3,
-        stagerDelay: 0.2,
+        delayChildren: 0.2,
         staggerChildren: 0.1,
         staggerDirection: 1,
       },
@@ -43,7 +43,7 @@ const CONTAINER_MOTION_PROPS = {
   initial: 'hidden',
   animate: 'visible',
   exit: 'hidden',
-};
+} satisfies HTMLMotionProps<'div'>;
 
 const MESSAGE_MOTION_PROPS = {
   variants: {
@@ -56,7 +56,7 @@ const MESSAGE_MOTION_PROPS = {
       translateY: 0,
     },
   },
-};
+} satisfies { variants: Variants };
 
 interface ChatTranscriptProps {
   hidden?: boolean;

@@ -1,7 +1,7 @@
 'use client';
 
 import { ConnectionState } from 'livekit-client';
-import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
+import { AnimatePresence, type HTMLMotionProps, motion, useReducedMotion } from 'motion/react';
 import { useSessionContext } from '@livekit/components-react';
 import type { AppConfig } from '@/app-config';
 import { SessionView } from '@/components/app/session-view';
@@ -34,7 +34,7 @@ const VIEW_MOTION_PROPS = {
     duration: 0.5,
     ease: 'linear',
   },
-};
+} satisfies HTMLMotionProps<'div'>;
 
 interface ViewControllerProps {
   appConfig: AppConfig;
