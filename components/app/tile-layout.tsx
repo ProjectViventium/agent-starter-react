@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
 import { Track } from 'livekit-client';
-import { AnimatePresence, motion } from 'motion/react';
+import { AnimatePresence, type Transition, motion } from 'motion/react';
 import {
   BarVisualizer,
   type TrackReference,
@@ -18,7 +18,7 @@ const ANIMATION_TRANSITION = {
   stiffness: 675,
   damping: 75,
   mass: 1,
-};
+} satisfies Transition;
 
 const classNames = {
   // GRID
