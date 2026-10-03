@@ -42,6 +42,13 @@ const TASK_STATE_LABELS: Record<VoiceTaskState, string> = {
   cancelled_unenforceable: 'Stop not confirmed',
 };
 
+const TERMINAL_TASK_STATES = new Set<VoiceTaskState>([
+  'completed',
+  'failed',
+  'cancelled_confirmed',
+  'cancelled_unenforceable',
+]);
+
 function taskPhase(task: VoiceTaskEventV1) {
   return task.phase && !Object.hasOwn(TASK_STATE_LABELS, task.phase)
     ? task.phase
@@ -57,12 +64,14 @@ function TaskItem({
   onCancel,
   onRetry,
   onInput,
+  onDismiss,
   pending = false,
 }: {
   task: VoiceTaskView;
   onCancel?: (taskId: string) => void;
   onRetry?: (taskId: string) => void;
   onInput?: (taskId: string, input: string) => void;
+  onDismiss?: () => void;
   pending?: boolean;
 }) {
   const [input, setInput] = React.useState('');
@@ -95,6 +104,24 @@ function TaskItem({
         <p className="text-muted-foreground text-xs leading-5">{task.detail}</p>
       ) : null}
 
+      {task.error?.message && task.error.message !== task.detail ? (
+        <p role="alert" className="text-destructive text-xs leading-5">
+          {task.error.message}
+        </p>
+      ) : null}
+
+      {onDismiss ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          aria-label={`Dismiss ${label}`}
+          onClick={onDismiss}
+        >
+          Dismiss
+        </Button>
+      ) : null}
+
       {task.sources.length > 0 ? (
         <ul aria-label={`Sources for ${label}`} className="flex flex-wrap gap-x-3 gap-y-1">
           {task.sources.map((source, index) => {
@@ -122,8 +149,22 @@ function TaskItem({
 
       {task.state === 'needs_input' && task.needsInput?.prompt ? (
         <div className="space-y-2">
-          <p className="text-sm">{task.needsInput.prompt}</p>
-          {onInput ? (
+          <p className="text-sm break-words whitespace-pre-wrap">{task.needsInput.prompt}</p>
+          {onInput && task.needsInput.choices?.length ? (
+            <div className="flex flex-wrap gap-2">
+              {task.needsInput.choices.map((choice) => (
+                <Button
+                  key={choice.value}
+                  type="button"
+                  size="sm"
+                  disabled={pending}
+                  onClick={() => onInput(task.taskId, choice.value)}
+                >
+                  {choice.label}
+                </Button>
+              ))}
+            </div>
+          ) : onInput ? (
             <form
               className="flex gap-2"
               onSubmit={(event) => {
@@ -209,14 +250,13 @@ export function CallActivity({
     () => new Set()
   );
   React.useEffect(() => {
-    const terminalStates = new Set([
-      'completed',
-      'failed',
-      'cancelled_confirmed',
-      'cancelled_unenforceable',
-    ]);
     const timers = tasks
-      .filter((task) => terminalStates.has(task.state) && !hiddenTerminalTasks.has(task.taskId))
+      .filter(
+        (task) =>
+          TERMINAL_TASK_STATES.has(task.state) &&
+          !task.error &&
+          !hiddenTerminalTasks.has(task.taskId)
+      )
       .map((task) =>
         window.setTimeout(() => {
           setHiddenTerminalTasks((current) => new Set(current).add(task.taskId));
@@ -267,6 +307,11 @@ export function CallActivity({
             onCancel={onCancel}
             onRetry={mode === 'listen_only' ? undefined : onRetry}
             onInput={mode === 'listen_only' ? undefined : onInput}
+            onDismiss={
+              task.error && TERMINAL_TASK_STATES.has(task.state)
+                ? () => setHiddenTerminalTasks((current) => new Set(current).add(task.taskId))
+                : undefined
+            }
             pending={pendingTaskIds?.has(task.taskId) === true}
           />
         ))}

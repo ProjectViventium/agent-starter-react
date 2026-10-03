@@ -100,6 +100,58 @@ const STAGE_DIRECTION_MIN_ALPHA = 3;
 const STAGE_DIRECTION_MAX_ALPHA = 24;
 const STAGE_DIRECTION_MAX_WORDS = 3;
 
+/** Shared inline-link boundary for transcript cleanup and rendering. */
+export function readTranscriptLink(text: string, start: number) {
+  if (text[start] !== '[') return null;
+  const closing = (opening: number, left: string, right: string) => {
+    let depth = 1;
+    let angle = left === '(' && text[opening + 1] === '<';
+    for (let index = opening + 1; index < text.length; index += 1) {
+      const char = text[index];
+      if (char === '\\') {
+        index += 1;
+      } else if (angle) {
+        if (char === '>') angle = false;
+      } else if (char === left) {
+        depth += 1;
+      } else if (char === right && --depth === 0) {
+        return index;
+      }
+    }
+    return -1;
+  };
+  const labelEnd = closing(start, '[', ']');
+  if (labelEnd < 0 || text[labelEnd + 1] !== '(') return null;
+  const end = closing(labelEnd + 1, '(', ')');
+  if (end < 0) return { end: text.length, complete: false, label: '', href: null };
+  const unescape = (value: string) =>
+    value.replace(/\\(.)/g, (match, char: string) => {
+      const code = char.charCodeAt(0);
+      return (code >= 33 && code <= 47) ||
+        (code >= 58 && code <= 64) ||
+        (code >= 91 && code <= 96) ||
+        (code >= 123 && code <= 126)
+        ? char
+        : match;
+    });
+  let destination = text.slice(labelEnd + 2, end);
+  if (destination.startsWith('<') && destination.endsWith('>')) {
+    destination = destination.slice(1, -1);
+  }
+  const href = transcriptHttpHref(unescape(destination));
+  return { end: end + 1, complete: true, label: unescape(text.slice(start + 1, labelEnd)), href };
+}
+
+export function transcriptHttpHref(value: string): string | null {
+  if (!value || /[\s\u0000-\u001f\u007f]/.test(value)) return null;
+  try {
+    const target = new URL(value);
+    return target.protocol === 'http:' || target.protocol === 'https:' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 const isStageDirectionBoundary = (ch?: string): boolean =>
   !ch || /\s/.test(ch) || '.,!?;:(){}<>"\''.includes(ch);
 
@@ -138,6 +190,13 @@ const stripBracketStageDirections = (text: string): string => {
     if (text[index] !== '[') {
       out += text[index];
       index += 1;
+      continue;
+    }
+
+    const link = readTranscriptLink(text, index);
+    if (link && (!link.complete || link.href)) {
+      out += text.slice(index, link.end);
+      index = link.end;
       continue;
     }
 

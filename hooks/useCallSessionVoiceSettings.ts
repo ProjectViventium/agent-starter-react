@@ -30,6 +30,7 @@ const VOICE_SETTINGS_REQUEST_TIMEOUT_MS = 5000;
 export type AssistantRouteAssignment = {
   provider: string | null;
   model: string | null;
+  effort?: string;
 };
 
 export type AssistantRouteInfo = {
@@ -127,7 +128,8 @@ function normalizeAssistantRouteAssignment(value: unknown): AssistantRouteAssign
     return null;
   }
 
-  return { provider, model };
+  const effort = typeof assignment.effort === 'string' ? assignment.effort.trim() : '';
+  return { provider, model, ...(effort ? { effort } : {}) };
 }
 
 function normalizeAssistantRouteInfo(value: unknown): AssistantRouteInfo | null {
@@ -415,6 +417,7 @@ export function useCallSessionVoiceSettings(
         setAssistantRoute(payload.assistantRoute);
         return true;
       } catch (nextError) {
+        setRequestedVoiceRouteState(requestedVoiceRoute);
         const message = formatVoiceSettingsError(nextError, 'Unable to save voice settings.');
         setError(message);
         setIssue(
@@ -429,7 +432,7 @@ export function useCallSessionVoiceSettings(
         setIsSaving(false);
       }
     },
-    [callSessionId, normalizeSelectionRoute]
+    [callSessionId, normalizeSelectionRoute, requestedVoiceRoute]
   );
 
   return {

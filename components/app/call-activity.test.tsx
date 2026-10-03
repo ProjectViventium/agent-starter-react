@@ -6,7 +6,13 @@ import {
   LatestSpeakerCaption,
   SpeakerTranscript,
 } from '@/components/app/call-activity';
-import type { SpeakerSegmentV1, VoiceTaskEventV1, VoiceTaskView } from '@/lib/voice-events';
+import {
+  type SpeakerSegmentV1,
+  type VoiceTaskEventV1,
+  type VoiceTaskView,
+  applyTaskEvent,
+  parseTaskEvent,
+} from '@/lib/voice-events';
 
 function task(overrides: Partial<VoiceTaskEventV1> = {}): VoiceTaskEventV1 {
   return {
@@ -129,6 +135,68 @@ describe('CallActivity', () => {
     expect(screen.getByText('Done')).toBeVisible();
     act(() => vi.advanceTimersByTime(8_001));
     expect(screen.queryByText('Done')).not.toBeInTheDocument();
+    vi.useRealTimers();
+  });
+
+  it('shows the authoritative error after an input request settles as failed', () => {
+    let tasks = applyTaskEvent(
+      [],
+      task({
+        state: 'needs_input',
+        type: 'needs_input',
+        phase: 'needs_input',
+        needsInput: { prompt: 'Allow this action?', inputType: 'confirm' },
+      })
+    );
+    tasks = applyTaskEvent(
+      tasks,
+      task({ eventId: 'continuing', sequence: 2, state: 'running', phase: 'running' })
+    );
+    tasks = applyTaskEvent(
+      tasks,
+      task({
+        eventId: 'declined',
+        sequence: 3,
+        state: 'failed',
+        type: 'error',
+        phase: 'failed',
+        cancellable: false,
+        error: {
+          code: 'native_input_declined',
+          message: 'You declined that action. It was stopped.',
+        },
+      })
+    );
+    render(<CallActivity tasks={tasks} onInput={vi.fn()} />);
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'You declined that action. It was stopped.'
+    );
+    expect(screen.queryByText('Allow this action?')).not.toBeInTheDocument();
+  });
+
+  it('retains terminal errors until explicit dismissal, while completed tasks still expire', () => {
+    vi.useFakeTimers();
+    render(
+      <CallActivity
+        tasks={[
+          view({
+            state: 'failed',
+            type: 'error',
+            phase: 'failed',
+            label: 'Stopped action',
+            cancellable: false,
+            error: { code: 'action_rejected', message: 'The action was stopped.' },
+          }),
+          view({ eventId: 'done', taskId: 'task-2', state: 'completed', type: 'result' }),
+        ]}
+      />
+    );
+    act(() => vi.advanceTimersByTime(20_001));
+    expect(screen.getByText('Stopped action')).toBeVisible();
+    expect(screen.queryByText('Done')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss Stopped action' }));
+    expect(screen.queryByText('Stopped action')).not.toBeInTheDocument();
     vi.useRealTimers();
   });
 
@@ -272,5 +340,36 @@ describe('SpeakerTranscript', () => {
     expect(screen.getByText('Synthetic speaker segment 4095')).toBeVisible();
     expect(screen.queryByText('Synthetic speaker segment 0')).not.toBeInTheDocument();
     expect(transcript.querySelectorAll('li').length).toBeLessThanOrEqual(512);
+  });
+});
+
+describe('Native action permission choices', () => {
+  it('parses a long approval prompt, renders its full text, and submits exact choice identifiers', () => {
+    const onInput = vi.fn();
+    const prompt = `${'Synthetic action details. '.repeat(120)}\nFinal requested operation.`;
+    expect(prompt.length).toBeGreaterThan(2_000);
+    const event = parseTaskEvent(
+      JSON.stringify(
+        task({
+          state: 'needs_input',
+          type: 'needs_input',
+          needsInput: {
+            prompt,
+            inputType: 'choice',
+            choices: [
+              { value: 'allow-a', label: 'Allow once' },
+              { value: 'deny-a', label: 'Deny' },
+            ],
+          },
+        })
+      )
+    );
+    expect(event).not.toBeNull();
+    render(<CallActivity tasks={applyTaskEvent([], event!)} onInput={onInput} />);
+    expect(screen.getByText(prompt, { exact: true, normalizer: (text) => text })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Allow once' }));
+    expect(onInput).toHaveBeenCalledWith('task-1', 'allow-a');
+    fireEvent.click(screen.getByRole('button', { name: 'Deny' }));
+    expect(onInput).toHaveBeenLastCalledWith('task-1', 'deny-a');
   });
 });

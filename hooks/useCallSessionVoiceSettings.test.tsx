@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { useCallSessionVoiceSettings } from '@/hooks/useCallSessionVoiceSettings';
 import type { VoiceRouteMetadata } from '@/hooks/useVoiceRoute';
 
@@ -60,6 +60,97 @@ const metadata: VoiceRouteMetadata = {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('useCallSessionVoiceSettings immutable route preflight', () => {
+  it('keeps configured effort across the existing assistant route response', async () => {
+    const primary = {
+      provider: 'glasshive-harness',
+      model: 'codex-cli:gpt-6.1-sol',
+      effort: 'high',
+    };
+    const voice = {
+      provider: 'glasshive-harness',
+      model: 'grok-build:grok-4.7-build-fast',
+      effort: ' high ',
+    };
+    const fallback = {
+      provider: 'glasshive-harness',
+      model: 'claude-code:claude-opus-5-5',
+      effort: 'high',
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              requestedVoiceRoute: {},
+              savedVoiceRoute: {},
+              selectionVoiceRoute: metadata,
+              assistantRoute: {
+                primary,
+                voiceCallLlm: voice,
+                voiceFallbackLlm: fallback,
+                fallbackLlm: fallback,
+                effective: voice,
+                inheritsPrimary: false,
+              },
+            }),
+            { status: 200 }
+          )
+      )
+    );
+    const { result } = renderHook(() => useCallSessionVoiceSettings('synthetic-call', metadata));
+    await waitFor(() => expect(result.current.assistantRoute?.effective.effort).toBe('high'));
+    expect(result.current.assistantRoute?.primary.effort).toBe('high');
+    expect(result.current.assistantRoute?.voiceFallbackLlm?.effort).toBe('high');
+  });
+  it('keeps the last saved choices when a save fails and can recover on retry', async () => {
+    const saved = {
+      stt: { provider: 'openai', variant: 'gpt-4o-transcribe' },
+      tts: { provider: 'cartesia', variant: 'voice-1' },
+    };
+    const next = { ...saved, tts: { provider: 'cartesia', variant: 'voice-2' } };
+    const selectionVoiceRoute = {
+      ...metadata,
+      capabilities: metadata.capabilities.map((capability) =>
+        capability.id === 'cartesia'
+          ? {
+              ...capability,
+              variants: [...capability.variants, { id: 'voice-2', label: 'Voice 2' }],
+            }
+          : capability
+      ),
+    };
+    const response = (route: typeof saved) =>
+      new Response(
+        JSON.stringify({
+          requestedVoiceRoute: route,
+          savedVoiceRoute: saved,
+          selectionVoiceRoute,
+        }),
+        { status: 200 }
+      );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(response(saved))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: 'Save unavailable' }), { status: 503 })
+      )
+      .mockResolvedValueOnce(response(next));
+    vi.stubGlobal('fetch', fetchMock);
+    const { result } = renderHook(() => useCallSessionVoiceSettings('call-1', metadata));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    await act(async () => {
+      expect(await result.current.setRequestedVoiceRoute(next)).toBe(false);
+    });
+    expect(result.current.configuredVoiceRoute).toEqual(saved);
+    expect(result.current.error).toBeTruthy();
+    await act(async () => {
+      expect(await result.current.setRequestedVoiceRoute(next)).toBe(true);
+    });
+    expect(result.current.configuredVoiceRoute).toEqual(next);
+    expect(result.current.error).toBeNull();
+    expect(result.current.savedVoiceRoute).toEqual(saved);
+  });
   it('never silently remaps or persists an unavailable configured route', async () => {
     const requestedVoiceRoute = {
       stt: { provider: 'assemblyai', variant: 'u3-rt-pro' },

@@ -162,6 +162,27 @@ describe('monotonic voice event stores', () => {
     expect(views[0]?.state).toBe('completed');
   });
 
+  it('clears stale progress detail when the task moves to native input', () => {
+    let views = applyTaskEvent([], task({ phase: 'cortex', detail: 'error' }));
+    views = applyTaskEvent(
+      views,
+      task({
+        eventId: 'input-2',
+        sequence: 2,
+        phase: 'needs_input',
+        type: 'needs_input',
+        state: 'needs_input',
+        needsInput: {
+          prompt: 'Approve synthetic write?',
+          inputType: 'choice',
+          choices: [{ value: 'once', label: 'Allow once' }],
+        },
+      })
+    );
+    expect(views[0]?.detail).toBeUndefined();
+    expect(views[0]?.needsInput?.prompt).toBe('Approve synthetic write?');
+  });
+
   it('hydrates a full snapshot, applies the next live event, and ignores stale replay', () => {
     const snapshot = task({
       eventId: 'snapshot-5',
