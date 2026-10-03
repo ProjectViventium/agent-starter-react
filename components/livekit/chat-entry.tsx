@@ -64,7 +64,8 @@ export function formatTranscriptLinks(message: string): React.ReactNode[] {
       while (
         closing >= 0 &&
         (message[closing - 1] === '`' || message[closing + delimiter.length] === '`')
-      ) closing = message.indexOf(delimiter, closing + delimiter.length);
+      )
+        closing = message.indexOf(delimiter, closing + delimiter.length);
       nodes.push(
         <React.Fragment key={`plain-${index}`}>
           {formatBareLinks(message.slice(start, index))}
@@ -72,7 +73,9 @@ export function formatTranscriptLinks(message: string): React.ReactNode[] {
       );
       const end = closing < 0 ? message.length : closing + delimiter.length;
       nodes.push(
-        closing < 0 ? message.slice(index) : (
+        closing < 0 ? (
+          message.slice(index)
+        ) : (
           <code key={`code-${index}`}>{message.slice(openingEnd, closing)}</code>
         )
       );
