@@ -229,6 +229,62 @@ describe('call engagement classification proxy', () => {
     expect((await response).status).toBe(503);
   });
 
+  it.each(['deadline', 'browser cancellation'] as const)(
+    'keeps %s active after headers while the Core response body is stalled',
+    async (ending) => {
+      vi.useFakeTimers();
+      process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'https://librechat.example.com';
+      process.env.VIVENTIUM_CALL_SESSION_SECRET = 'synthetic-server-secret';
+      const fetchMock = vi.fn((_url: URL, init?: RequestInit) =>
+        Promise.resolve(
+          new Response(
+            new ReadableStream({
+              start(body) {
+                init?.signal?.addEventListener(
+                  'abort',
+                  () => body.error(new DOMException('Aborted', 'AbortError')),
+                  { once: true }
+                );
+              },
+            }),
+            { status: 200 }
+          )
+        )
+      );
+      vi.stubGlobal('fetch', fetchMock);
+      const browserRequest = new AbortController();
+      let settled = false;
+      const pending = POST(
+        request(validRequest, { capability: browserCapability, signal: browserRequest.signal })
+      ).then((response) => {
+        settled = true;
+        return response;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetchMock).toHaveBeenCalledOnce();
+      const coreSignal = fetchMock.mock.calls[0]?.[1]?.signal;
+      expect(coreSignal?.aborted).toBe(false);
+      expect(settled).toBe(false);
+      expect(vi.getTimerCount()).toBe(1);
+
+      if (ending === 'deadline') {
+        await vi.advanceTimersByTimeAsync(8_499);
+        expect(coreSignal?.aborted).toBe(false);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+      } else {
+        browserRequest.abort();
+      }
+
+      expect(coreSignal?.aborted).toBe(true);
+      const response = await pending;
+      expect(response.status).toBe(ending === 'deadline' ? 504 : 503);
+      expect(await response.json()).toMatchObject({ code: 'gateway_down', retryable: true });
+      expect(response.headers.get('Cache-Control')).toBe('no-store');
+      expect(vi.getTimerCount()).toBe(0);
+    }
+  );
+
   it('passes an already-cancelled browser request to fetch as aborted', async () => {
     process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'https://librechat.example.com';
     process.env.VIVENTIUM_CALL_SESSION_SECRET = 'synthetic-server-secret';

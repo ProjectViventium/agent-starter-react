@@ -69,9 +69,8 @@ async function proxyCallEngagementRequest(
     controller.abort();
   }, CALL_ENGAGEMENT_PROXY_TIMEOUT_MS);
 
-  let response: Response;
   try {
-    response = await fetch(target, {
+    const response = await fetch(target, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -84,6 +83,23 @@ async function proxyCallEngagementRequest(
       // Never forward the server-only call secret through an upstream redirect.
       redirect: 'error',
       signal: controller.signal,
+    });
+    const payload: unknown = await response.json().catch((error) => {
+      if (controller.signal.aborted) {
+        throw error;
+      }
+      return null;
+    });
+    controller.signal.throwIfAborted();
+    if (!response.ok) {
+      return NextResponse.json(normalizeProxyFailure(response.status, payload), {
+        status: response.status,
+        headers: NO_STORE_HEADERS,
+      });
+    }
+    return NextResponse.json(payload ?? {}, {
+      status: response.status,
+      headers: NO_STORE_HEADERS,
     });
   } catch {
     if (timedOut) {
@@ -108,18 +124,6 @@ async function proxyCallEngagementRequest(
     clearTimeout(timeoutId);
     request.signal.removeEventListener('abort', abortRequest);
   }
-
-  const payload: unknown = await response.json().catch(() => null);
-  if (!response.ok) {
-    return NextResponse.json(normalizeProxyFailure(response.status, payload), {
-      status: response.status,
-      headers: NO_STORE_HEADERS,
-    });
-  }
-  return NextResponse.json(payload ?? {}, {
-    status: response.status,
-    headers: NO_STORE_HEADERS,
-  });
 }
 
 export async function POST(request: Request) {
