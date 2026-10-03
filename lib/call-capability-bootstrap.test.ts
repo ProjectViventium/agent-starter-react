@@ -2,6 +2,23 @@ import { describe, expect, it, vi } from 'vitest';
 import { CALL_CAPABILITY_BOOTSTRAP_SCRIPT } from '@/lib/call-capability-bootstrap';
 
 describe('pre-hydration call capability bootstrap', () => {
+  it('preserves the settings entry without opening the microphone', () => {
+    const replace = vi.fn();
+    const fakeWindow = {
+      location: {
+        search: '?callSessionId=call-settings&autoConnect=0',
+        hash: `#viventiumCallCapability=${'B'.repeat(43)}`,
+        pathname: '/playground/call-bootstrap',
+        replace,
+      },
+      history: { state: null, replaceState: vi.fn() },
+      sessionStorage: { setItem: vi.fn() },
+    };
+    new Function('window', 'document', CALL_CAPABILITY_BOOTSTRAP_SCRIPT)(fakeWindow, {
+      referrer: 'https://chat.example.test/c/2',
+    });
+    expect(replace).toHaveBeenCalledWith('/playground/?callSessionId=call-settings&autoConnect=0');
+  });
   it('stores and strips the fragment before any delayed app request', () => {
     const order: string[] = [];
     const capability = 'A'.repeat(43);

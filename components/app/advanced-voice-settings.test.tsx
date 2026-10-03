@@ -85,6 +85,42 @@ afterEach(() => {
 });
 
 describe('ConnectedAdvancedVoiceSettings', () => {
+  it('shows the configured effort beside the assistant and backup model', () => {
+    const primary = {
+      provider: 'glasshive-harness',
+      model: 'codex-cli:gpt-6.1-sol',
+      effort: 'high',
+    };
+    const voice = {
+      provider: 'glasshive-harness',
+      model: 'grok-build:grok-4.7-build-fast',
+      effort: 'high',
+    };
+    const fallback = {
+      provider: 'glasshive-harness',
+      model: 'claude-code:claude-opus-5-5',
+      effort: 'high',
+    };
+    render(
+      <ConnectedAdvancedVoiceSettings
+        appConfig={appConfig}
+        ended={false}
+        settings={{
+          ...settings,
+          assistantRoute: {
+            primary,
+            voiceCallLlm: voice,
+            fallbackLlm: fallback,
+            voiceFallbackLlm: fallback,
+            effective: voice,
+            inheritsPrimary: false,
+          },
+        }}
+      />
+    );
+    expect(screen.getByText(/grok-build:grok-4\.7-build-fast/)).toHaveTextContent('high');
+    expect(screen.getByText(/claude-code:claude-opus-5-5/)).toHaveTextContent('high');
+  });
   it('stays visible and read-only during connected and ended call states', () => {
     const { rerender } = render(
       <ConnectedAdvancedVoiceSettings appConfig={appConfig} settings={settings} ended={false} />

@@ -19,7 +19,7 @@ try{
  window.history.replaceState(window.history.state,'',window.location.pathname+window.location.search);
  p=window.location.pathname||'';
  b=p.endsWith('/call-bootstrap')?p.slice(0,-15):'';
- d=si.test(i)?b+'/?callSessionId='+encodeURIComponent(i)+'&autoConnect=1':b+'/';
+ d=si.test(i)?b+'/?callSessionId='+encodeURIComponent(i)+'&autoConnect='+(q.get('autoConnect')==='0'?'0':'1'):b+'/';
  if(si.test(i)&&sc.test(c)){
   window.sessionStorage.setItem('viventium.call.capability.v1:'+i,c);
   rememberOpener();

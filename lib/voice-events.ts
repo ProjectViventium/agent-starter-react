@@ -102,7 +102,11 @@ export type VoiceTaskEventV1 = {
   source?: VoiceTaskSource;
   /** Full accumulated sources are allowed only on authoritative reconnect snapshots. */
   sources?: VoiceTaskSource[];
-  needsInput?: { prompt: string; inputType: 'text' | 'choice' | 'confirm' };
+  needsInput?: {
+    prompt: string;
+    inputType: 'text' | 'choice' | 'confirm';
+    choices?: { value: string; label: string }[];
+  };
   resultMessageId?: string;
   owner?: { kind?: string; id?: string };
   error?: { code?: string; message?: string; retryable?: boolean };
@@ -250,12 +254,26 @@ function normalizeNeedsInput(value: unknown): VoiceTaskEventV1['needsInput'] | u
   }
   if (
     !isRecord(value) ||
-    !isBoundedString(value.prompt, 2_000) ||
+    !isBoundedString(value.prompt, 8_000) ||
     (value.inputType !== 'text' && value.inputType !== 'choice' && value.inputType !== 'confirm')
   ) {
     return null;
   }
-  return { prompt: value.prompt, inputType: value.inputType };
+  if (
+    value.choices !== undefined &&
+    (!Array.isArray(value.choices) ||
+      value.choices.length === 0 ||
+      value.choices.length > 16 ||
+      value.choices.some(
+        (choice) =>
+          !isRecord(choice) ||
+          !isBoundedString(choice.value, 160) ||
+          !isBoundedString(choice.label, 160)
+      ))
+  )
+    return null;
+  const choices = value.choices as { value: string; label: string }[] | undefined;
+  return { prompt: value.prompt, inputType: value.inputType, ...(choices ? { choices } : {}) };
 }
 
 function normalizeError(value: unknown): VoiceTaskEventV1['error'] | undefined | null {
@@ -467,6 +485,9 @@ export function applyTaskEvent(current: VoiceTaskView[], next: VoiceTaskEventV1)
       ? {
           ...existing,
           ...next,
+          detail:
+            next.detail ??
+            (next.phase && next.phase !== existing.phase ? undefined : existing.detail),
           firstEmittedAt: existing.firstEmittedAt,
           sources,
           needsInput:

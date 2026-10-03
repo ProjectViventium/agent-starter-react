@@ -61,7 +61,7 @@ export function AdvancedVoiceSettings({
         <p className="text-muted-foreground mb-3 text-sm">
           {readOnly
             ? 'Voice choices are fixed for this call.'
-            : 'Changes apply to this call only. Your account defaults stay the same.'}
+            : 'Changes apply to this call. To use them next time, return to your chat and select “Save these voice choices as my default”.'}
         </p>
         {route ? (
           <VoiceRouteControl
@@ -89,6 +89,12 @@ export function AdvancedVoiceSettings({
               <dt className="font-medium">Assistant</dt>
               <dd>
                 {assistant.effective.provider} · {assistant.effective.model}
+                {assistant.effective.effort ? (
+                  <>
+                    {' '}
+                    · <span className="capitalize">{assistant.effective.effort}</span>
+                  </>
+                ) : null}
               </dd>
             </div>
             {assistant.voiceFallbackLlm || assistant.fallbackLlm ? (
@@ -97,6 +103,15 @@ export function AdvancedVoiceSettings({
                 <dd>
                   {(assistant.voiceFallbackLlm ?? assistant.fallbackLlm)?.provider} ·{' '}
                   {(assistant.voiceFallbackLlm ?? assistant.fallbackLlm)?.model}
+                  {(assistant.voiceFallbackLlm ?? assistant.fallbackLlm)?.effort ? (
+                    <>
+                      {' '}
+                      ·{' '}
+                      <span className="capitalize">
+                        {(assistant.voiceFallbackLlm ?? assistant.fallbackLlm)?.effort}
+                      </span>
+                    </>
+                  ) : null}
                 </dd>
               </div>
             ) : null}
