@@ -153,6 +153,7 @@ describe('connection details call-session authority', () => {
   });
 
   it('keeps a signed call room alive for reconnect without changing its canonical identity', async () => {
+    const trace = vi.spyOn(console, 'info').mockImplementation(() => undefined);
     process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'https://librechat.example.com';
     process.env.VIVENTIUM_CALL_SESSION_SECRET = 'server-secret';
     process.env.LIVEKIT_API_KEY = 'test-key';
@@ -212,6 +213,20 @@ describe('connection details call-session authority', () => {
     expect(liveKitMocks.accessTokens[0]?.roomConfig?.departureTimeout).toBeGreaterThanOrEqual(60);
     expect(liveKitMocks.accessTokens[0]?.roomConfig?.agents).toEqual([]);
     expect(liveKitMocks.createDispatch).not.toHaveBeenCalled();
+    expect(trace).toHaveBeenCalledTimes(2);
+    expect(trace.mock.calls[0]).toEqual([
+      '[Viventium] call_connection_details',
+      expect.objectContaining({ phase: 'accepted', reclaimDispatch: false,
+        callSessionHash: expect.stringMatching(/^[a-f0-9]{64}$/) }),
+    ]);
+    expect(trace.mock.calls[1]).toEqual([
+      '[Viventium] call_connection_details',
+      expect.objectContaining({ phase: 'settled', status: 200, elapsedMs: expect.any(Number) }),
+    ]);
+    expect(JSON.stringify(trace.mock.calls)).not.toContain(canonical.callSessionId);
+    expect(JSON.stringify(trace.mock.calls)).not.toContain(canonical.roomName);
+    expect(JSON.stringify(trace.mock.calls)).not.toContain('signed-token');
+    expect(JSON.stringify(trace.mock.calls)).not.toContain('A'.repeat(43));
   });
 
   it('reclaims a missing room-config worker through an explicit claimed dispatch', async () => {
@@ -1012,6 +1027,7 @@ describe('connection details call-session authority', () => {
   });
 
   it('rejects an ended authoritative session before dispatch or token creation', async () => {
+    const trace = vi.spyOn(console, 'info').mockImplementation(() => undefined);
     process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'https://librechat.example.com';
     process.env.VIVENTIUM_CALL_SESSION_SECRET = 'server-secret';
     process.env.LIVEKIT_API_KEY = 'test-key';
@@ -1044,6 +1060,7 @@ describe('connection details call-session authority', () => {
     );
 
     expect(response.status).toBe(410);
+    expect(trace).not.toHaveBeenCalled();
     await expect(response.json()).resolves.toEqual({
       code: 'auth_expired',
       message: 'This call has ended. Start a fresh call from Viventium.',
@@ -1239,5 +1256,34 @@ describe('connection details call-session authority', () => {
     expect(response.status).toBe(200);
     expect(liveKitMocks.createDispatch).not.toHaveBeenCalled();
     expect(liveKitMocks.toJwt).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe('authoritative token hydration independent of advisory settings', () => {
+  it.each([
+    { name: 'expired authority', status: 403, body: { code: 'auth_expired', message: 'Synthetic authority rejected.' }, expectedStatus: 403, expectedCode: 'auth_expired' },
+    { name: 'missing persisted route', status: 200, body: { ...canonical, requestedVoiceRoute: null }, expectedStatus: 409, expectedCode: 'no_route' },
+  ])('rejects $name before dispatch and token mint', async ({ status, body, expectedStatus, expectedCode }) => {
+    process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'https://librechat.example.com';
+    process.env.VIVENTIUM_CALL_SESSION_SECRET = 'server-secret';
+    process.env.LIVEKIT_API_KEY = 'test-key';
+    process.env.LIVEKIT_API_SECRET = 'test-secret';
+    process.env.LIVEKIT_URL = 'ws://livekit.example.com';
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(body), {
+      status, headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { POST } = await import('@/app/api/connection-details/route');
+    const response = await POST(new Request('https://playground.example.com/api/connection-details', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-VIVENTIUM-CALL-CAPABILITY': 'A'.repeat(43) },
+      body: JSON.stringify({ roomName: canonical.roomName, agentMetadata: JSON.stringify({ callSessionId: canonical.callSessionId }) }),
+    }));
+    expect(response.status).toBe(expectedStatus);
+    expect(await response.json()).toMatchObject({ code: expectedCode });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(liveKitMocks.createDispatch).not.toHaveBeenCalled();
+    expect(liveKitMocks.toJwt).not.toHaveBeenCalled();
   });
 });

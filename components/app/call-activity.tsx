@@ -49,8 +49,26 @@ const TERMINAL_TASK_STATES = new Set<VoiceTaskState>([
   'cancelled_unenforceable',
 ]);
 
+// Core's declared phase codes describe machinery; the state badge carries their user status.
+const INTERNAL_TASK_PHASES = new Set([
+  'cortex',
+  'tool',
+  'tool_completed',
+  'delegated',
+  'source',
+  'follow_up',
+  'agent',
+  'owner_linked',
+  'retried',
+  'already_completed',
+  'cancel_barrier_recovering',
+]);
+
 function taskPhase(task: VoiceTaskEventV1) {
-  return task.phase && !Object.hasOwn(TASK_STATE_LABELS, task.phase)
+  if (task.phase === 'starting') return 'Starting';
+  return task.phase &&
+    !Object.hasOwn(TASK_STATE_LABELS, task.phase) &&
+    !INTERNAL_TASK_PHASES.has(task.phase)
     ? task.phase
     : TASK_STATE_LABELS[task.state];
 }
@@ -66,34 +84,42 @@ function TaskItem({
   onInput,
   onDismiss,
   pending = false,
+  stopSpeech = false,
 }: {
   task: VoiceTaskView;
-  onCancel?: (taskId: string) => void;
+  onCancel?: (taskId: string, presentationRef?: string) => void;
   onRetry?: (taskId: string) => void;
   onInput?: (taskId: string, input: string) => void;
   onDismiss?: () => void;
   pending?: boolean;
+  stopSpeech?: boolean;
 }) {
   const [input, setInput] = React.useState('');
   const label = taskLabel(task);
   const progress = task.progress;
-  const statusLabel = TASK_STATE_LABELS[task.state];
+  const statusLabel = stopSpeech && task.state === 'completed' && task.presentation?.state === 'speaking'
+    ? 'Speaking' : task.state === 'completed' && task.presentation?.state === 'stop_requested'
+      ? 'Stopping speech' : TASK_STATE_LABELS[task.state];
+  const phase = taskPhase(task);
+  const showPhase = phase !== label && phase !== statusLabel;
 
   return (
     <li className="border-border/70 flex min-w-0 flex-col gap-2 border-b py-2 last:border-0">
       <div className="flex min-w-0 items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="truncate text-sm font-semibold">{label}</p>
-          <p className="text-muted-foreground text-xs leading-5">
-            {taskPhase(task)}
-            {progress ? (
-              <span>
-                {' · '}
-                {progress.current} of {progress.total}
-                {progress.unit ? ` ${progress.unit}` : ''}
-              </span>
-            ) : null}
-          </p>
+          {showPhase || progress ? (
+            <p className="text-muted-foreground text-xs leading-5">
+              {showPhase ? phase : null}
+              {progress ? (
+                <span>
+                  {showPhase ? ' · ' : ''}
+                  {progress.current} of {progress.total}
+                  {progress.unit ? ` ${progress.unit}` : ''}
+                </span>
+              ) : null}
+            </p>
+          ) : null}
         </div>
         <span className="bg-muted text-muted-foreground shrink-0 rounded-full px-2 py-1 font-mono text-[10px] uppercase">
           {statusLabel}
@@ -193,19 +219,20 @@ function TaskItem({
         </div>
       ) : null}
 
-      {task.cancellable || task.retryable ? (
+      {task.cancellable || task.retryable || stopSpeech ? (
         <div className="flex gap-2">
-          {task.cancellable && onCancel ? (
+          {(task.cancellable || stopSpeech) && onCancel ? (
             <Button
               type="button"
               variant="outline"
               size="sm"
-              aria-label={`Cancel ${label}`}
-              onClick={() => onCancel(task.taskId)}
+              aria-label={stopSpeech ? `Stop speech for ${label}` : `Cancel ${label}`}
+              onClick={() => stopSpeech
+                ? onCancel(task.taskId, task.presentation?.ref) : onCancel(task.taskId)}
               disabled={pending}
             >
               <StopCircleIcon weight="bold" />
-              Cancel
+              {stopSpeech ? 'Stop speech' : 'Cancel'}
             </Button>
           ) : null}
           {task.retryable && onRetry ? (
@@ -229,6 +256,7 @@ function TaskItem({
 
 export function CallActivity({
   mode = 'call',
+  isAgentSpeaking = false,
   tasks,
   onCancel,
   onRetry,
@@ -238,8 +266,9 @@ export function CallActivity({
   className,
 }: {
   mode?: VoiceCallMode;
+  isAgentSpeaking?: boolean;
   tasks: VoiceTaskView[];
-  onCancel?: (taskId: string) => void;
+  onCancel?: (taskId: string, presentationRef?: string) => void;
   onRetry?: (taskId: string) => void;
   onInput?: (taskId: string, input: string) => void;
   actionError?: string | null;
@@ -249,12 +278,25 @@ export function CallActivity({
   const [hiddenTerminalTasks, setHiddenTerminalTasks] = React.useState<Set<string>>(
     () => new Set()
   );
+  const latestPresentationTask = tasks.reduce<VoiceTaskView | null>((latest, task) =>
+    task.presentation && (!latest?.presentation ||
+      task.presentation.startedAtMs > latest.presentation.startedAtMs) ? task : latest, null);
+  const speakingTaskId = isAgentSpeaking && latestPresentationTask?.state === 'completed' &&
+    (latestPresentationTask.presentation?.state === 'speaking' ||
+      latestPresentationTask.presentation?.state === 'stop_requested')
+      ? latestPresentationTask.taskId : null;
+  const stoppingTaskId = latestPresentationTask?.state === 'completed' &&
+    latestPresentationTask.presentation?.state === 'stop_requested'
+      ? latestPresentationTask.taskId : null;
+  const visiblePresentationTaskId = speakingTaskId || stoppingTaskId;
   React.useEffect(() => {
     const timers = tasks
       .filter(
         (task) =>
           TERMINAL_TASK_STATES.has(task.state) &&
+          task.taskId !== visiblePresentationTaskId &&
           !task.error &&
+          task.state !== 'cancelled_unenforceable' &&
           !hiddenTerminalTasks.has(task.taskId)
       )
       .map((task) =>
@@ -263,8 +305,8 @@ export function CallActivity({
         }, 8_000)
       );
     return () => timers.forEach((timer) => window.clearTimeout(timer));
-  }, [hiddenTerminalTasks, tasks]);
-  const visibleTasks = tasks.filter((task) => !hiddenTerminalTasks.has(task.taskId));
+  }, [hiddenTerminalTasks, tasks, visiblePresentationTaskId]);
+  const visibleTasks = tasks.filter((task) => task.taskId === visiblePresentationTaskId || !hiddenTerminalTasks.has(task.taskId));
   const liveSummary = visibleTasks
     .map((task) => {
       const progress = task.progress
@@ -308,11 +350,14 @@ export function CallActivity({
             onRetry={mode === 'listen_only' ? undefined : onRetry}
             onInput={mode === 'listen_only' ? undefined : onInput}
             onDismiss={
-              task.error && TERMINAL_TASK_STATES.has(task.state)
+              task.taskId !== visiblePresentationTaskId &&
+              (task.error || task.state === 'cancelled_unenforceable') &&
+              TERMINAL_TASK_STATES.has(task.state)
                 ? () => setHiddenTerminalTasks((current) => new Set(current).add(task.taskId))
                 : undefined
             }
             pending={pendingTaskIds?.has(task.taskId) === true}
+            stopSpeech={task.taskId === speakingTaskId}
           />
         ))}
       </ul>

@@ -1,13 +1,24 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useAgent, useSessionContext } from '@livekit/components-react';
 import { toastAlert } from '@/components/livekit/alert-toast';
 
-export function useAgentErrors() {
+export function useAgentErrors(onFailure?: () => void) {
   const agent = useAgent();
   const { isConnected, end } = useSessionContext();
+  // VIVENTIUM START: Handle a failure transition once despite SDK object/callback changes.
+  const failureHandled = useRef(false);
+  // VIVENTIUM END
 
   useEffect(() => {
-    if (isConnected && agent.state === 'failed') {
+    // VIVENTIUM START: A later non-failed state permits a new failure notification.
+    if (agent.state !== 'failed') {
+      failureHandled.current = false;
+      return;
+    }
+    if (isConnected && !failureHandled.current) {
+      failureHandled.current = true;
+      onFailure?.();
+      // VIVENTIUM END
       const reasons = agent.failureReasons;
 
       toastAlert({
@@ -43,5 +54,5 @@ export function useAgentErrors() {
 
       end();
     }
-  }, [agent, isConnected, end]);
+  }, [agent, isConnected, end, onFailure]);
 }

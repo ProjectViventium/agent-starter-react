@@ -4,6 +4,7 @@
  * VIVENTIUM END */
 import { NextResponse } from 'next/server';
 import { AccessToken, AgentDispatchClient, RoomServiceClient } from 'livekit-server-sdk';
+import { createHash } from 'node:crypto';
 import { AgentDispatch, JobStatus, RoomAgentDispatch, RoomConfiguration } from '@livekit/protocol';
 import {
   AuthoritativeCallSessionError,
@@ -625,7 +626,10 @@ async function confirmViventiumDispatch(
   }
 }
 
-export async function POST(req: Request) {
+async function connectionDetails(
+  req: Request,
+  onAuthorized: (callSessionId: string, reclaimDispatch: boolean) => void
+) {
   try {
     if (Boolean(VIVENTIUM_LIBRECHAT_ORIGIN) !== Boolean(VIVENTIUM_CALL_SESSION_SECRET)) {
       return NextResponse.json(
@@ -734,6 +738,7 @@ export async function POST(req: Request) {
         }
         applyAuthoritativeCallSession(options, canonical);
         applyCallSessionRoomRetention(options);
+        onAuthorized(currentCallSessionId, options.reclaimDispatch === true);
       } catch (error) {
         if (error instanceof AuthoritativeCallSessionError) {
           return NextResponse.json(
@@ -1003,4 +1008,39 @@ export async function POST(req: Request) {
     }
     return NextResponse.json({ message: 'Unknown error' }, { status: 500 });
   }
+}
+
+/* VIVENTIUM START
+ * Purpose: Join accepted browser dispatch preparation to gateway lifecycle timing without
+ * recording capabilities, tokens, participant identities, room names, or user information.
+ * VIVENTIUM END */
+export async function POST(req: Request) {
+  const startedAt = Date.now();
+  const observation: {
+    acceptedCall: { callSessionHash: string; reclaimDispatch: boolean } | null;
+  } = {
+    acceptedCall: null,
+  };
+  const response = await connectionDetails(req, (callSessionId, reclaimDispatch) => {
+    observation.acceptedCall = {
+      callSessionHash: createHash('sha256').update(callSessionId).digest('hex'),
+      reclaimDispatch,
+    };
+    console.info('[Viventium] call_connection_details', {
+      ...observation.acceptedCall,
+      phase: 'accepted',
+      requestedAt: new Date(startedAt).toISOString(),
+      observedAt: new Date().toISOString(),
+    });
+  });
+  if (observation.acceptedCall) {
+    console.info('[Viventium] call_connection_details', {
+      ...observation.acceptedCall,
+      phase: 'settled',
+      observedAt: new Date().toISOString(),
+      status: response.status,
+      elapsedMs: Date.now() - startedAt,
+    });
+  }
+  return response;
 }

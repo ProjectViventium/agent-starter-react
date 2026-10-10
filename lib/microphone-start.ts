@@ -1,4 +1,41 @@
+import { callCapabilityStorageKey } from '@/lib/call-browser-capability';
 import { CallRequestError, classifyCallIssue } from '@/lib/call-start';
+
+const CALL_MICROPHONE_STORAGE_PREFIX = 'viventium.call.microphone-enabled.v1:';
+
+function microphoneSessionStorage(): Storage | null {
+  try {
+    return typeof window === 'undefined' ? null : window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+export function readCallMicrophoneEnabled(
+  callSessionId: string | null | undefined,
+  storage: Pick<Storage, 'getItem'> | null = microphoneSessionStorage()
+): boolean | null {
+  if (!callSessionId || !callCapabilityStorageKey(callSessionId) || !storage) return null;
+  try {
+    const value = storage.getItem(`${CALL_MICROPHONE_STORAGE_PREFIX}${callSessionId}`);
+    return value === 'true' ? true : value === 'false' ? false : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveCallMicrophoneEnabled(
+  callSessionId: string | null | undefined,
+  enabled: boolean,
+  storage: Pick<Storage, 'setItem'> | null = microphoneSessionStorage()
+): void {
+  if (!callSessionId || !callCapabilityStorageKey(callSessionId) || !storage) return;
+  try {
+    storage.setItem(`${CALL_MICROPHONE_STORAGE_PREFIX}${callSessionId}`, String(enabled));
+  } catch {
+    // A browser storage failure must not block the user's microphone control.
+  }
+}
 
 export type MicrophonePermissionState = PermissionState | 'unsupported';
 
@@ -69,12 +106,24 @@ export async function enableCallMicrophone({
   enable,
   disable,
   grantedTimeoutMs,
+  signal,
 }: {
   permissionState: MicrophonePermissionState;
   enable: () => Promise<unknown>;
   disable: () => Promise<unknown>;
   grantedTimeoutMs: number;
+  signal?: AbortSignal;
 }): Promise<void> {
+  const terminalError = () =>
+    signal?.reason ??
+    new CallRequestError(
+      {
+        kind: 'gateway_down',
+        message: 'The call disconnected before the microphone was ready. Please try again.',
+      },
+      true
+    );
+  if (signal?.aborted) throw structuredMicrophoneError(terminalError());
   if (permissionState === 'denied') {
     throw new CallRequestError(
       {
@@ -86,26 +135,33 @@ export async function enableCallMicrophone({
   }
 
   const enablePromise = enable();
-  if (permissionState !== 'granted') {
-    try {
-      await enablePromise;
-      return;
-    } catch (error) {
-      throw structuredMicrophoneError(error);
-    }
-  }
-
   const timeoutMs = Math.max(1, Math.min(Math.floor(grantedTimeoutMs), 60_000));
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  let onAbort: (() => void) | undefined;
   try {
-    await Promise.race([
-      enablePromise,
-      new Promise<never>((_, reject) => {
-        timeoutId = setTimeout(() => reject(new MicrophoneStartupTimeoutError()), timeoutMs);
-      }),
-    ]);
+    const pending: Promise<unknown>[] = [enablePromise];
+    if (signal) {
+      pending.push(
+        new Promise<never>((_, reject) => {
+          onAbort = () => reject(terminalError());
+          signal.addEventListener('abort', onAbort, { once: true });
+          if (signal.aborted) onAbort();
+        })
+      );
+    }
+    // The browser owns how long its permission prompt stays open. Only terminal call loss
+    // cancels that wait; the existing timeout applies solely to already-granted capture.
+    if (permissionState === 'granted') {
+      pending.push(
+        new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(() => reject(new MicrophoneStartupTimeoutError()), timeoutMs);
+        })
+      );
+    }
+    await Promise.race(pending);
+    if (signal?.aborted) throw terminalError();
   } catch (error) {
-    if (error instanceof MicrophoneStartupTimeoutError) {
+    if (error instanceof MicrophoneStartupTimeoutError || signal?.aborted) {
       // Fail promptly, end the room in the caller, and neutralize both an in-flight enable and a
       // late success. The second disable is required because getUserMedia cannot be aborted.
       void disable().catch(() => undefined);
@@ -113,6 +169,9 @@ export async function enableCallMicrophone({
         () => disable().catch(() => undefined),
         () => undefined
       );
+      if (signal?.aborted) throw structuredMicrophoneError(terminalError());
+    }
+    if (error instanceof MicrophoneStartupTimeoutError) {
       throw new CallRequestError(
         {
           kind: 'gateway_down',
@@ -123,6 +182,7 @@ export async function enableCallMicrophone({
     }
     throw structuredMicrophoneError(error);
   } finally {
+    if (signal && onAbort) signal.removeEventListener('abort', onAbort);
     if (timeoutId !== null) {
       clearTimeout(timeoutId);
     }

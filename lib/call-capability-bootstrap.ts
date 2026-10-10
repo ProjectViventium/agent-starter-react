@@ -3,7 +3,7 @@
  * This generic script contains no capability or session value from the server response.
  * VIVENTIUM END */
 export const CALL_CAPABILITY_BOOTSTRAP_SCRIPT = `(function(){
-var i='',c='',l='',n='',p='',b='',d='';
+var i='',c='',l='',n='',p='',b='',d='',j='';
 var si=/^[A-Za-z0-9._:-]{1,160}$/;
 var sc=/^[A-Za-z0-9_-]{43}$/;
 function go(){window.location.replace(d);}
@@ -12,6 +12,7 @@ function rememberOpener(){try{var r=new URL(document.referrer);if((r.protocol===
 try{
  var q=new URLSearchParams(window.location.search);
  i=(q.get('callSessionId')||'').trim();
+ j=q.get('conversationId')||'';
  var h=window.location.hash||'';
  var hp=new URLSearchParams(h.charAt(0)==='#'?h.slice(1):h);
  c=(hp.get('viventiumCallCapability')||'').trim();
@@ -20,6 +21,7 @@ try{
  p=window.location.pathname||'';
  b=p.endsWith('/call-bootstrap')?p.slice(0,-15):'';
  d=si.test(i)?b+'/?callSessionId='+encodeURIComponent(i)+'&autoConnect='+(q.get('autoConnect')==='0'?'0':'1'):b+'/';
+ if(si.test(i)&&j!=='new'&&/^[A-Za-z0-9_-]{1,160}$/.test(j))d+='&conversationId='+encodeURIComponent(j);
  if(si.test(i)&&sc.test(c)){
   window.sessionStorage.setItem('viventium.call.capability.v1:'+i,c);
   rememberOpener();

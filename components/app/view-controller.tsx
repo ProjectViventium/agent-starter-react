@@ -1,12 +1,15 @@
 'use client';
 
+import React, { useCallback, useState } from 'react';
 import { ConnectionState } from 'livekit-client';
 import { AnimatePresence, type HTMLMotionProps, motion, useReducedMotion } from 'motion/react';
 import { useSessionContext } from '@livekit/components-react';
 import type { AppConfig } from '@/app-config';
+import { LinkedChatLink } from '@/components/app/linked-chat-link';
 import { SessionView } from '@/components/app/session-view';
 import { WelcomeView } from '@/components/app/welcome-view';
 import type { VoiceCallMode } from '@/hooks/useCallSessionState';
+import { retainedLinkedChatHref } from '@/lib/call-handoff';
 import type { CallIssue } from '@/lib/call-start';
 import type { VoiceCallStatus } from '@/lib/call-state';
 
@@ -81,51 +84,76 @@ export function ViewController({
 }: ViewControllerProps) {
   const { isConnected, connectionState } = useSessionContext();
   const reducedMotion = useReducedMotion();
+  const [linkedChat, setLinkedChat] = useState<{
+    callSessionId: string | null;
+    href: string | null;
+  } | null>(null);
+  const onLinkedChatHrefChange = useCallback(
+    (href: string | null) => {
+      if (callSessionId && href) retainedLinkedChatHref(callSessionId, href);
+      setLinkedChat((current) =>
+        current?.callSessionId === callSessionId && current.href === href
+          ? current
+          : { callSessionId, href }
+      );
+    },
+    [callSessionId]
+  );
+  const linkedChatHref =
+    linkedChat?.callSessionId === callSessionId ? linkedChat.href : null;
   const showSessionView = isConnected || connectionState !== ConnectionState.Disconnected;
   const viewMotionProps = reducedMotion
     ? { initial: false as const, animate: 'visible', exit: 'visible', transition: { duration: 0 } }
     : VIEW_MOTION_PROPS;
 
   return (
-    <AnimatePresence mode="wait">
-      {/* Welcome view */}
-      {!showSessionView && (
-        <MotionWelcomeView
-          key="welcome"
-          {...viewMotionProps}
-          startButtonText={
-            startButtonText ?? (canStartCall ? appConfig.startButtonText : 'Open from Viventium')
-          }
-          onStartCall={onStartCall}
-          startDisabled={!canStartCall}
-          helperText={callIssue ? undefined : startHint}
-          callIssue={callIssue}
-          onRetry={onRetry}
-          callEnded={callEnded}
-          mode={mode}
-        />
-      )}
-      {/* Session view */}
-      {showSessionView && (
-        <MotionSessionView
-          key="session-view"
-          {...viewMotionProps}
-          appConfig={appConfig}
-          callSessionId={callSessionId}
-          conversationId={conversationId}
-          mode={mode}
-          authoritativeStatus={authoritativeStatus}
-          modePending={modePending}
-          onModeChange={onModeChange}
-          callStateError={callStateError}
-          onCallEnded={onCallEnded}
-          onCallEnding={onCallEnding}
-          callIssue={callIssue}
-          onIssueRetry={onRetry}
-          audioRecoveryRequired={audioRecoveryRequired}
-          onAudioRecovery={onAudioRecovery}
-        />
-      )}
-    </AnimatePresence>
+    <>
+      <LinkedChatLink
+        callSessionId={callSessionId}
+        conversationId={conversationId}
+        href={linkedChatHref}
+      />
+      <AnimatePresence mode="wait">
+        {/* Welcome view */}
+        {!showSessionView && (
+          <MotionWelcomeView
+            key="welcome"
+            {...viewMotionProps}
+            startButtonText={
+              startButtonText ?? (canStartCall ? appConfig.startButtonText : 'Open from Viventium')
+            }
+            onStartCall={onStartCall}
+            startDisabled={!canStartCall}
+            helperText={callIssue ? undefined : startHint}
+            callIssue={callIssue}
+            onRetry={onRetry}
+            callEnded={callEnded}
+            mode={mode}
+          />
+        )}
+        {/* Session view */}
+        {showSessionView && (
+          <MotionSessionView
+            key="session-view"
+            {...viewMotionProps}
+            appConfig={appConfig}
+            callSessionId={callSessionId}
+            conversationId={conversationId}
+            onLinkedChatHrefChange={onLinkedChatHrefChange}
+            mode={mode}
+            authoritativeStatus={authoritativeStatus}
+            modePending={modePending}
+            onModeChange={onModeChange}
+            callStateError={callStateError}
+            onCallEnded={onCallEnded}
+            onCallEnding={onCallEnding}
+            callIssue={callIssue}
+            onIssueRetry={onRetry}
+            audioRecoveryRequired={audioRecoveryRequired}
+            onAudioRecovery={onAudioRecovery}
+          />
+        )}
+      </AnimatePresence>
+    </>
   );
 }

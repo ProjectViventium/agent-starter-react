@@ -31,6 +31,8 @@ export type AssistantRouteAssignment = {
   provider: string | null;
   model: string | null;
   effort?: string;
+  providerLabel?: string;
+  modelLabel?: string;
 };
 
 export type AssistantRouteInfo = {
@@ -129,7 +131,17 @@ function normalizeAssistantRouteAssignment(value: unknown): AssistantRouteAssign
   }
 
   const effort = typeof assignment.effort === 'string' ? assignment.effort.trim() : '';
-  return { provider, model, ...(effort ? { effort } : {}) };
+  const providerLabel =
+    typeof assignment.providerLabel === 'string' ? assignment.providerLabel.trim() : '';
+  const modelLabel =
+    typeof assignment.modelLabel === 'string' ? assignment.modelLabel.trim() : '';
+  return {
+    provider,
+    model,
+    ...(effort ? { effort } : {}),
+    ...(providerLabel ? { providerLabel } : {}),
+    ...(modelLabel ? { modelLabel } : {}),
+  };
 }
 
 function normalizeAssistantRouteInfo(value: unknown): AssistantRouteInfo | null {

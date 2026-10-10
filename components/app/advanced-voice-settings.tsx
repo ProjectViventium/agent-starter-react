@@ -39,7 +39,7 @@ export function AdvancedVoiceSettings({
       ref={detailsRef}
       className="fixed top-3 right-3 z-[90] max-w-[calc(100vw-1.5rem)]"
       onKeyDown={(event) => {
-        if (event.key === 'Escape') {
+        if (event.key === 'Escape' && !event.defaultPrevented) {
           event.preventDefault();
           close();
         }
@@ -88,7 +88,8 @@ export function AdvancedVoiceSettings({
             <div>
               <dt className="font-medium">Assistant</dt>
               <dd>
-                {assistant.effective.provider} · {assistant.effective.model}
+                {assistant.effective.providerLabel ?? assistant.effective.provider} ·{' '}
+                {assistant.effective.modelLabel ?? assistant.effective.model}
                 {assistant.effective.effort ? (
                   <>
                     {' '}
@@ -101,8 +102,11 @@ export function AdvancedVoiceSettings({
               <div>
                 <dt className="font-medium">Backup assistant</dt>
                 <dd>
-                  {(assistant.voiceFallbackLlm ?? assistant.fallbackLlm)?.provider} ·{' '}
-                  {(assistant.voiceFallbackLlm ?? assistant.fallbackLlm)?.model}
+                  {(assistant.voiceFallbackLlm ?? assistant.fallbackLlm)?.providerLabel ??
+                    (assistant.voiceFallbackLlm ?? assistant.fallbackLlm)?.provider}{' '}
+                  ·{' '}
+                  {(assistant.voiceFallbackLlm ?? assistant.fallbackLlm)?.modelLabel ??
+                    (assistant.voiceFallbackLlm ?? assistant.fallbackLlm)?.model}
                   {(assistant.voiceFallbackLlm ?? assistant.fallbackLlm)?.effort ? (
                     <>
                       {' '}

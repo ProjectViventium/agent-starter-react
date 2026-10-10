@@ -1,3 +1,5 @@
+import { callCapabilityStorageKey } from '@/lib/call-browser-capability';
+
 export const CALL_RESULT_BRIDGE_TYPE = 'viventium.call.event.v1' as const;
 
 export type CallResultBridgePayload = {
@@ -33,6 +35,52 @@ export function resolveLinkedChatOrigin(referrer: string): string | null {
       return null;
     }
     return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+/** Navigate to the normal authenticated chat; never rewrite an authored artifact target. */
+export function resolveLinkedChatHref(
+  origin: string | null,
+  conversationId: string | null
+): string | null {
+  if (
+    !origin ||
+    !isHttpOrigin(origin) ||
+    !conversationId ||
+    conversationId === 'new' ||
+    conversationId.length > 160 ||
+    !/^[A-Za-z0-9_-]+$/.test(conversationId)
+  ) {
+    return null;
+  }
+  return `${origin}/c/${encodeURIComponent(conversationId)}`;
+}
+
+/** Retain only normal chat navigation in this tab after the call capability is cleared. */
+export function retainedLinkedChatHref(
+  callSessionId: string,
+  href?: string | null,
+  storage?: Pick<Storage, 'getItem' | 'setItem'> | null
+): string | null {
+  if (!callCapabilityStorageKey(callSessionId)) return null;
+  const key = `viventium.call.linked-chat.v1:${callSessionId}`;
+  try {
+    const tabStorage =
+      storage === undefined
+        ? typeof window === 'undefined'
+          ? null
+          : window.sessionStorage
+        : storage;
+    if (!tabStorage) return null;
+    const value = href ?? tabStorage.getItem(key);
+    if (!value) return null;
+    const url = new URL(value);
+    const id = url.pathname.startsWith('/c/') ? url.pathname.slice(3) : null;
+    if (resolveLinkedChatHref(url.origin, id) !== value) return null;
+    if (href) tabStorage.setItem(key, value);
+    return value;
   } catch {
     return null;
   }

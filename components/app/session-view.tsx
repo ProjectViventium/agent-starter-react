@@ -10,6 +10,7 @@ import {
   SpeakerTranscript,
 } from '@/components/app/call-activity';
 import { CallIssueNotice } from '@/components/app/call-issue-notice';
+import { CallResultFiles } from '@/components/app/call-result-files';
 import {
   type AccessibleCallStatus,
   CallStatusIndicator,
@@ -82,6 +83,7 @@ interface SessionViewProps {
   appConfig: AppConfig;
   callSessionId: string | null;
   conversationId?: string | null;
+  onLinkedChatHrefChange?: (href: string | null) => void;
   mode?: VoiceCallMode;
   authoritativeStatus?: VoiceCallStatus | null;
   modePending?: boolean;
@@ -103,6 +105,7 @@ export const SessionView = ({
   authoritativeStatus = null,
   modePending = false,
   onModeChange,
+  onLinkedChatHrefChange,
   callStateError,
   onCallEnded,
   onCallEnding,
@@ -148,7 +151,12 @@ export const SessionView = ({
     speakerSegment: latestSpeakerSegment,
   });
   const taskActions = useCallTaskActions(callSessionId, applyAuthoritativeTaskEvent);
-  const notifyLinkedChat = useCallResultBridge({ callSessionId, conversationId, tasks });
+  const notifyLinkedChat = useCallResultBridge({
+    callSessionId,
+    conversationId,
+    tasks,
+    onLinkedChatHrefChange,
+  });
   const handleEnded = React.useCallback(() => {
     notifyLinkedChat();
     onCallEnded?.();
@@ -164,7 +172,7 @@ export const SessionView = ({
     [messages, speakerSegments.length]
   );
   const scrollAreaRef = useRef<HTMLDivElement>(null);
-  const { isInputBlocked } = useMicrophoneHealth();
+  const { issue: microphoneIssue, isInputBlocked } = useMicrophoneHealth();
   const isAgentAvailable = participants.some((participant) => participant.isAgent);
   const activeTask = tasks.find((task) =>
     ['queued', 'running', 'recovering', 'cancelling', 'needs_input'].includes(task.state)
@@ -219,13 +227,15 @@ export const SessionView = ({
     }
   }, [messages]);
 
-  const preConnectMessage = isAgentAvailable
-    ? mode === 'listen_only'
-      ? LISTEN_ONLY_PRECONNECT_MESSAGE
-      : 'Agent is listening, ask it a question'
-    : isInputBlocked
-      ? 'Turn on your microphone to bring Viventium into the room'
+  // VIVENTIUM START: An available agent cannot hear a blocked local microphone.
+  const preConnectMessage = isInputBlocked
+    ? (microphoneIssue ?? 'Turn on your microphone to bring Viventium into the room')
+    : isAgentAvailable
+      ? mode === 'listen_only'
+        ? LISTEN_ONLY_PRECONNECT_MESSAGE
+        : 'Agent is listening, ask it a question'
       : 'Connecting Viventium to the room...';
+  // VIVENTIUM END
 
   return (
     <section className="bg-background relative z-10 h-full w-full overflow-hidden" {...props}>
@@ -299,14 +309,16 @@ export const SessionView = ({
         ) : null}
         <CallActivity
           mode={mode}
+          isAgentSpeaking={agent.state === 'speaking' && !durableTerminalStatus && mode !== 'listen_only'}
           tasks={tasks}
-          onCancel={(taskId) => void taskActions.cancel(taskId)}
+          onCancel={(taskId, presentationRef) => void taskActions.cancel(taskId, presentationRef)}
           onRetry={(taskId) => void taskActions.retry(taskId)}
           onInput={(taskId, input) => void taskActions.submitInput(taskId, input)}
           actionError={taskActions.actionError}
           pendingTaskIds={taskActions.pendingTaskIds}
           className="mb-2 max-h-52 overflow-y-auto"
         />
+        <CallResultFiles callSessionId={callSessionId} tasks={tasks} />
         {appConfig.isPreConnectBufferEnabled && (
           <PreConnectMessage messages={messages} message={preConnectMessage} className="pb-4" />
         )}
@@ -314,6 +326,7 @@ export const SessionView = ({
           <Fade bottom className="absolute inset-x-0 top-0 h-4 -translate-y-full" />
           <AgentControlBar
             appConfig={appConfig}
+            callSessionId={callSessionId}
             controls={controls}
             isConnected={session.isConnected}
             onDisconnect={() => {

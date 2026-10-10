@@ -1,10 +1,11 @@
 'use client';
 
 import * as React from 'react';
-import { readCallOpenerOrigin } from '@/lib/call-browser-capability';
+import { callCapabilityStorageKey, readCallOpenerOrigin } from '@/lib/call-browser-capability';
 import {
   CALL_RESULT_BRIDGE_TYPE,
   createCallResultBridge,
+  resolveLinkedChatHref,
   resolveLinkedChatOrigin,
 } from '@/lib/call-handoff';
 import type { VoiceTaskView } from '@/lib/voice-events';
@@ -20,10 +21,12 @@ export function useCallResultBridge({
   callSessionId,
   conversationId,
   tasks,
+  onLinkedChatHrefChange,
 }: {
   callSessionId: string | null;
   conversationId: string | null;
   tasks: VoiceTaskView[];
+  onLinkedChatHrefChange?: (href: string | null) => void;
 }) {
   const targetOrigin =
     typeof document === 'undefined'
@@ -34,19 +37,22 @@ export function useCallResultBridge({
   const lastConversationIdRef = React.useRef(conversationId);
 
   React.useEffect(() => {
+    lastConversationIdRef.current = conversationId;
     bridgeRef.current = createCallResultBridge({
       opener: typeof window === 'undefined' ? null : window.opener,
       targetOrigin,
     });
-  }, [targetOrigin]);
+  }, [targetOrigin, callSessionId]);
 
   React.useEffect(() => {
-    if (!callSessionId) {
+    if (!callSessionId || !callCapabilityStorageKey(callSessionId)) {
+      onLinkedChatHrefChange?.(null);
       return;
     }
     for (const task of tasks) {
+      if (task.callSessionId !== callSessionId) continue;
       const taskConversationId = task.conversationId ?? conversationId;
-      if (taskConversationId) {
+      if (resolveLinkedChatHref(targetOrigin, taskConversationId)) {
         lastConversationIdRef.current = taskConversationId;
       }
       if (taskConversationId && (task.type === 'result' || TERMINAL_STATES.has(task.state))) {
@@ -60,10 +66,11 @@ export function useCallResultBridge({
         });
       }
     }
-  }, [callSessionId, conversationId, tasks]);
+    onLinkedChatHrefChange?.(resolveLinkedChatHref(targetOrigin, lastConversationIdRef.current));
+  }, [callSessionId, conversationId, tasks, targetOrigin, onLinkedChatHrefChange]);
 
   return React.useCallback(() => {
-    const linkedConversationId = conversationId ?? lastConversationIdRef.current;
+    const linkedConversationId = lastConversationIdRef.current ?? conversationId;
     if (!callSessionId) {
       return false;
     }

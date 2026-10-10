@@ -42,6 +42,7 @@ export function AgentControlBar({
   appConfig,
   controls,
   saveUserChoices = true,
+  callSessionId,
   className,
   isConnected = false,
   onDisconnect,
@@ -66,7 +67,7 @@ export function AgentControlBar({
     handleVideoDeviceChange,
     handleMicrophoneDeviceSelectError,
     handleCameraDeviceSelectError,
-  } = useInputControls({ onDeviceError, saveUserChoices });
+  } = useInputControls({ onDeviceError, saveUserChoices, callSessionId });
 
   const handleSendMessage = async (message: string) => {
     if (mode === 'listen_only') {
