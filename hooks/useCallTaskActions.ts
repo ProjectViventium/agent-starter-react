@@ -110,9 +110,18 @@ export function useCallTaskActions(
   const [pendingTaskIds, setPendingTaskIds] = useState<Set<string>>(() => new Set());
 
   const request = useCallback(
-    async (taskId: string, action: 'cancel' | 'retry' | 'input', input?: string, presentationRef?: string) => {
-      if (!callSessionId || !SAFE_ID.test(callSessionId) || !SAFE_ID.test(taskId) ||
-          (presentationRef !== undefined && !SAFE_ID.test(presentationRef))) {
+    async (
+      taskId: string,
+      action: 'cancel' | 'retry' | 'input',
+      input?: string,
+      presentationRef?: string
+    ) => {
+      if (
+        !callSessionId ||
+        !SAFE_ID.test(callSessionId) ||
+        !SAFE_ID.test(taskId) ||
+        (presentationRef !== undefined && !SAFE_ID.test(presentationRef))
+      ) {
         setActionError('This task action is not available for the current call.');
         setActionRetryable(false);
         return false;
@@ -229,7 +238,8 @@ export function useCallTaskActions(
       setActionError(null);
       setActionRetryable(false);
     },
-    cancel: (taskId: string, presentationRef?: string) => request(taskId, 'cancel', undefined, presentationRef),
+    cancel: (taskId: string, presentationRef?: string) =>
+      request(taskId, 'cancel', undefined, presentationRef),
     retry: (taskId: string) => request(taskId, 'retry'),
     submitInput: (taskId: string, input: string) => request(taskId, 'input', input),
   };

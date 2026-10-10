@@ -158,11 +158,9 @@ describe('ConnectedAdvancedVoiceSettings', () => {
             inheritsPrimary: false,
           },
         }}
-      />,
+      />
     );
-    expect(screen.getByText(/Grok \/ Grok 4.7 Fast/)).toHaveTextContent(
-      'xPerfect',
-    );
+    expect(screen.getByText(/Grok \/ Grok 4.7 Fast/)).toHaveTextContent('xPerfect');
     expect(screen.getByText(/Anthropic \/ Opus 5.5/)).toHaveTextContent('high');
     expect(screen.queryByText(/grok-build:/)).not.toBeInTheDocument();
     expect(screen.queryByText(/claude-code:/)).not.toBeInTheDocument();

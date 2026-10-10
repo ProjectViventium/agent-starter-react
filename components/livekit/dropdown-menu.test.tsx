@@ -6,8 +6,6 @@ import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { AdvancedVoiceSettings } from '@/components/app/advanced-voice-settings';
-import type { UseCallSessionVoiceSettingsResult } from '@/hooks/useCallSessionVoiceSettings';
-import type { VoiceRouteMetadata, VoiceRouteState } from '@/hooks/useVoiceRoute';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -17,6 +15,8 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/livekit/dropdown-menu';
+import type { UseCallSessionVoiceSettingsResult } from '@/hooks/useCallSessionVoiceSettings';
+import type { VoiceRouteMetadata, VoiceRouteState } from '@/hooks/useVoiceRoute';
 
 let utilities: HTMLStyleElement;
 beforeEach(() => {
@@ -95,24 +95,47 @@ describe('native speech menu layers', () => {
   });
 });
 
-
 const route: VoiceRouteMetadata = {
   stt: {
-    provider: 'test-stt', label: 'Test listening', displayLabel: 'Test listening',
-    isLocal: true, variant: 'test-model', variantLabel: 'Test model', variantType: 'model',
+    provider: 'test-stt',
+    label: 'Test listening',
+    displayLabel: 'Test listening',
+    isLocal: true,
+    variant: 'test-model',
+    variantLabel: 'Test model',
+    variantType: 'model',
   },
   tts: {
-    provider: 'test-tts', label: 'Test speaking', displayLabel: 'Test speaking',
-    isLocal: true, variant: 'test-voice', variantLabel: 'Test voice', variantType: 'voice',
+    provider: 'test-tts',
+    label: 'Test speaking',
+    displayLabel: 'Test speaking',
+    isLocal: true,
+    variant: 'test-voice',
+    variantLabel: 'Test voice',
+    variantType: 'voice',
   },
   ttsFallback: null,
   capabilities: [
-    { id: 'test-stt', modality: 'stt', label: 'Test listening', isLocal: true,
-      available: true, unavailableReason: null, variantLabel: 'model',
-      variants: [{ id: 'test-model', label: 'Test model' }] },
-    { id: 'test-tts', modality: 'tts', label: 'Test speaking', isLocal: true,
-      available: true, unavailableReason: null, variantLabel: 'voice',
-      variants: [{ id: 'test-voice', label: 'Test voice' }] },
+    {
+      id: 'test-stt',
+      modality: 'stt',
+      label: 'Test listening',
+      isLocal: true,
+      available: true,
+      unavailableReason: null,
+      variantLabel: 'model',
+      variants: [{ id: 'test-model', label: 'Test model' }],
+    },
+    {
+      id: 'test-tts',
+      modality: 'tts',
+      label: 'Test speaking',
+      isLocal: true,
+      available: true,
+      unavailableReason: null,
+      variantLabel: 'voice',
+      variants: [{ id: 'test-voice', label: 'Test voice' }],
+    },
   ],
 };
 const configured: VoiceRouteState = {
@@ -123,9 +146,14 @@ const configured: VoiceRouteState = {
 function renderActualSettings() {
   const changed = vi.fn();
   const settings = {
-    configuredVoiceRoute: configured, selectionVoiceRoute: route,
-    assistantRoute: null, isLoading: false, isSaving: false,
-    error: null, notice: null, setRequestedVoiceRoute: changed,
+    configuredVoiceRoute: configured,
+    selectionVoiceRoute: route,
+    assistantRoute: null,
+    isLoading: false,
+    isSaving: false,
+    error: null,
+    notice: null,
+    setRequestedVoiceRoute: changed,
   } as unknown as UseCallSessionVoiceSettingsResult;
   render(<AdvancedVoiceSettings settings={settings} />);
   const summary = screen.getByText('Advanced voice settings', { selector: 'summary' });
@@ -158,24 +186,27 @@ describe('actual VoiceRouteControl nested Escape', () => {
   it.each([
     ['Test listening', 'Test model'],
     ['Test speaking', 'Test voice'],
-  ])('lets Radix dismiss the %s variant submenu without closing settings', async (label, variant) => {
-    const { panel, summary, changed } = renderActualSettings();
-    const trigger = screen.getByRole('button', { name: new RegExp(`^${label}`) });
-    trigger.focus();
-    fireEvent.keyDown(trigger, { key: 'Enter' });
-    const provider = await screen.findByRole('menuitem', { name: new RegExp(`^${label}`) });
-    provider.focus();
-    fireEvent.keyDown(provider, { key: 'ArrowRight' });
-    const item = await screen.findByRole('menuitem', { name: variant });
-    fireEvent.keyDown(item, { key: 'Escape' });
-    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
-    expect(panel.open).toBe(true);
-    await waitFor(() => expect(trigger).toHaveFocus());
-    expect(changed).not.toHaveBeenCalled();
-    fireEvent.keyDown(trigger, { key: 'Escape' });
-    expect(panel.open).toBe(false);
-    expect(summary).toHaveFocus();
-  });
+  ])(
+    'lets Radix dismiss the %s variant submenu without closing settings',
+    async (label, variant) => {
+      const { panel, summary, changed } = renderActualSettings();
+      const trigger = screen.getByRole('button', { name: new RegExp(`^${label}`) });
+      trigger.focus();
+      fireEvent.keyDown(trigger, { key: 'Enter' });
+      const provider = await screen.findByRole('menuitem', { name: new RegExp(`^${label}`) });
+      provider.focus();
+      fireEvent.keyDown(provider, { key: 'ArrowRight' });
+      const item = await screen.findByRole('menuitem', { name: variant });
+      fireEvent.keyDown(item, { key: 'Escape' });
+      await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+      expect(panel.open).toBe(true);
+      await waitFor(() => expect(trigger).toHaveFocus());
+      expect(changed).not.toHaveBeenCalled();
+      fireEvent.keyDown(trigger, { key: 'Escape' });
+      expect(panel.open).toBe(false);
+      expect(summary).toHaveFocus();
+    }
+  );
 
   it('closes settings and returns summary focus for an unhandled panel Escape', () => {
     const { panel, summary, changed } = renderActualSettings();

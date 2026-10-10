@@ -209,12 +209,19 @@ describe('CallActivity', () => {
     const consoleError = vi.spyOn(console, 'error');
     try {
       const source = { id: 'cortex-child-a', title: 'Background follow-up' };
-      const snapshot = parseTaskEvent(task({
-        eventId: 'reconnect-snapshot', type: 'snapshot', state: 'completed',
-        phase: 'follow_up', label: 'Follow-up ready', source, sources: [source],
-        resultMessageId: 'main-result',
-        presentation: { ref: source.id, state: 'interrupted', startedAtMs: 1234 },
-      }))!;
+      const snapshot = parseTaskEvent(
+        task({
+          eventId: 'reconnect-snapshot',
+          type: 'snapshot',
+          state: 'completed',
+          phase: 'follow_up',
+          label: 'Follow-up ready',
+          source,
+          sources: [source],
+          resultMessageId: 'main-result',
+          presentation: { ref: source.id, state: 'interrupted', startedAtMs: 1234 },
+        })
+      )!;
       let tasks = applyTaskEvent([], snapshot);
       const { rerender } = render(<CallActivity tasks={tasks} />);
       const sources = screen.getByRole('list', { name: 'Sources for Follow-up ready' });
@@ -222,8 +229,13 @@ describe('CallActivity', () => {
 
       const second = { ...source, id: 'cortex-child-b' };
       const next = task({
-        eventId: 'late-child-2', sequence: 2, state: 'completed', phase: 'follow_up',
-        label: 'Follow-up ready', source: second, resultMessageId: 'main-result',
+        eventId: 'late-child-2',
+        sequence: 2,
+        state: 'completed',
+        phase: 'follow_up',
+        label: 'Follow-up ready',
+        source: second,
+        resultMessageId: 'main-result',
       });
       tasks = applyTaskEvent(tasks, next);
       rerender(<CallActivity tasks={tasks} />);
@@ -231,7 +243,10 @@ describe('CallActivity', () => {
       expect(within(sources).getAllByText('Background follow-up')).toHaveLength(2);
 
       tasks = applyTaskEvent(tasks, {
-        ...next, type: 'snapshot', eventId: 'equal-reconnect-snapshot', sources: [source, second],
+        ...next,
+        type: 'snapshot',
+        eventId: 'equal-reconnect-snapshot',
+        sources: [source, second],
       });
       rerender(<CallActivity tasks={tasks} />);
       expect(within(sources).getAllByRole('listitem')).toHaveLength(2);
@@ -600,113 +615,207 @@ describe('declared phase presentation', () => {
   );
 });
 
-
 describe('completed text with ongoing native speech', () => {
   it('keeps one exact active completed reply visible and stops only its presentation', () => {
     vi.useFakeTimers();
     try {
       const onCancel = vi.fn();
-      const old = view({taskId: 'old', state: 'completed', cancellable: false,
-        presentation: {ref: 'old-speech', state: 'speaking', startedAtMs: 1000}});
-      const current = view({taskId: 'current', label: 'Completed reply', state: 'completed',
-        cancellable: false, resultMessageId: 'result-current',
-        presentation: {ref: 'current-speech', state: 'speaking', startedAtMs: 2000}});
+      const old = view({
+        taskId: 'old',
+        state: 'completed',
+        cancellable: false,
+        presentation: { ref: 'old-speech', state: 'speaking', startedAtMs: 1000 },
+      });
+      const current = view({
+        taskId: 'current',
+        label: 'Completed reply',
+        state: 'completed',
+        cancellable: false,
+        resultMessageId: 'result-current',
+        presentation: { ref: 'current-speech', state: 'speaking', startedAtMs: 2000 },
+      });
       render(<CallActivity isAgentSpeaking tasks={[old, current]} onCancel={onCancel} />);
       act(() => vi.advanceTimersByTime(20_001));
-      const stop = screen.getByRole('button', {name: 'Stop speech for Completed reply'});
+      const stop = screen.getByRole('button', { name: 'Stop speech for Completed reply' });
       expect(stop).toBeVisible();
-      expect(screen.getAllByRole('button', {name: /^Stop speech/})).toHaveLength(1);
+      expect(screen.getAllByRole('button', { name: /^Stop speech/ })).toHaveLength(1);
       fireEvent.click(stop);
       expect(onCancel).toHaveBeenCalledWith('current', 'current-speech');
-      expect(screen.queryByRole('button', {name: /^Cancel/})).not.toBeInTheDocument();
-    } finally { vi.useRealTimers(); }
+      expect(screen.queryByRole('button', { name: /^Cancel/ })).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it('terminal or superseded audio removes Stop and cannot revive a stale completed row', () => {
-    const current = view({taskId: 'current', state: 'completed', cancellable: false,
-      presentation: {ref: 'current-speech', state: 'interrupted', startedAtMs: 2000}});
-    const old = view({taskId: 'old', state: 'completed', cancellable: false,
-      presentation: {ref: 'old-speech', state: 'speaking', startedAtMs: 1000}});
+    const current = view({
+      taskId: 'current',
+      state: 'completed',
+      cancellable: false,
+      presentation: { ref: 'current-speech', state: 'interrupted', startedAtMs: 2000 },
+    });
+    const old = view({
+      taskId: 'old',
+      state: 'completed',
+      cancellable: false,
+      presentation: { ref: 'old-speech', state: 'speaking', startedAtMs: 1000 },
+    });
     render(<CallActivity isAgentSpeaking tasks={[old, current]} onCancel={vi.fn()} />);
-    expect(screen.queryByRole('button', {name: /^Stop speech/})).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Stop speech/ })).not.toBeInTheDocument();
   });
   it('completed history without an authenticated presentation never gets a Stop control', () => {
-    render(<CallActivity isAgentSpeaking tasks={Array.from({length: 10}, (_, n) => view({taskId: `done-${n}`,
-      state: 'completed', cancellable: false}))} onCancel={vi.fn()} />);
-    expect(screen.queryByRole('button', {name: /^Stop speech/})).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', {name: /^Cancel/})).not.toBeInTheDocument();
+    render(
+      <CallActivity
+        isAgentSpeaking
+        tasks={Array.from({ length: 10 }, (_, n) =>
+          view({ taskId: `done-${n}`, state: 'completed', cancellable: false })
+        )}
+        onCancel={vi.fn()}
+      />
+    );
+    expect(screen.queryByRole('button', { name: /^Stop speech/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Cancel/ })).not.toBeInTheDocument();
   });
   it('generation Cancel remains unchanged while a completed Stop request is truthfully pending', () => {
     const onCancel = vi.fn();
-    render(<CallActivity isAgentSpeaking tasks={[view({taskId: 'working'}), view({taskId: 'done',
-      state: 'completed', cancellable: false,
-      presentation: {ref: 'speech-done', state: 'stop_requested', startedAtMs: 2000}})]}
-      onCancel={onCancel} />);
-    fireEvent.click(screen.getByRole('button', {name: 'Cancel Market lookup'}));
+    render(
+      <CallActivity
+        isAgentSpeaking
+        tasks={[
+          view({ taskId: 'working' }),
+          view({
+            taskId: 'done',
+            state: 'completed',
+            cancellable: false,
+            presentation: { ref: 'speech-done', state: 'stop_requested', startedAtMs: 2000 },
+          }),
+        ]}
+        onCancel={onCancel}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel Market lookup' }));
     expect(onCancel).toHaveBeenCalledWith('working');
-    expect(screen.getByText('Stopping speech', {exact: true})).toBeVisible();
-    fireEvent.click(screen.getByRole('button', {name: /^Stop speech/}));
+    expect(screen.getByText('Stopping speech', { exact: true })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: /^Stop speech/ }));
     expect(onCancel).toHaveBeenCalledWith('done', 'speech-done');
   });
 });
 
-
 it('keeps active speech Stop available without a no-op Dismiss for a degraded completed result', () => {
-  const completed = view({state: 'completed', cancellable: false,
-    error: {code: 'native_output_file_unavailable', message: 'The requested file is unavailable.'},
-    presentation: {ref: 'speech-1', state: 'speaking', startedAtMs: 1000}});
-  const {rerender} = render(<CallActivity isAgentSpeaking tasks={[completed]} onCancel={vi.fn()} />);
-  expect(screen.getByRole('button', {name: /^Stop speech/})).toBeVisible();
-  expect(screen.queryByRole('button', {name: /^Dismiss/})).not.toBeInTheDocument();
-  rerender(<CallActivity isAgentSpeaking tasks={[{...completed,
-    presentation: {ref: 'speech-1', state: 'interrupted', startedAtMs: 1000}}]} onCancel={vi.fn()} />);
-  expect(screen.queryByRole('button', {name: /^Stop speech/})).not.toBeInTheDocument();
-  expect(screen.getByRole('button', {name: /^Dismiss/})).toBeVisible();
+  const completed = view({
+    state: 'completed',
+    cancellable: false,
+    error: {
+      code: 'native_output_file_unavailable',
+      message: 'The requested file is unavailable.',
+    },
+    presentation: { ref: 'speech-1', state: 'speaking', startedAtMs: 1000 },
+  });
+  const { rerender } = render(
+    <CallActivity isAgentSpeaking tasks={[completed]} onCancel={vi.fn()} />
+  );
+  expect(screen.getByRole('button', { name: /^Stop speech/ })).toBeVisible();
+  expect(screen.queryByRole('button', { name: /^Dismiss/ })).not.toBeInTheDocument();
+  rerender(
+    <CallActivity
+      isAgentSpeaking
+      tasks={[
+        {
+          ...completed,
+          presentation: { ref: 'speech-1', state: 'interrupted', startedAtMs: 1000 },
+        },
+      ]}
+      onCancel={vi.fn()}
+    />
+  );
+  expect(screen.queryByRole('button', { name: /^Stop speech/ })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /^Dismiss/ })).toBeVisible();
 });
 
-
 it('hides restored or lost-terminal stale speech controls when the native agent is no longer speaking', () => {
-  const completed = view({state: 'completed', cancellable: false,
-    presentation: {ref: 'speech-1', state: 'speaking', startedAtMs: 1000}});
-  const {rerender} = render(<CallActivity isAgentSpeaking tasks={[completed]} onCancel={vi.fn()} />);
-  expect(screen.getByRole('button', {name: /^Stop speech/})).toBeVisible();
+  const completed = view({
+    state: 'completed',
+    cancellable: false,
+    presentation: { ref: 'speech-1', state: 'speaking', startedAtMs: 1000 },
+  });
+  const { rerender } = render(
+    <CallActivity isAgentSpeaking tasks={[completed]} onCancel={vi.fn()} />
+  );
+  expect(screen.getByRole('button', { name: /^Stop speech/ })).toBeVisible();
   rerender(<CallActivity isAgentSpeaking={false} tasks={[completed]} onCancel={vi.fn()} />);
-  expect(screen.queryByRole('button', {name: /^Stop speech/})).not.toBeInTheDocument();
-  expect(screen.queryByText('Speaking', {exact:true})).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /^Stop speech/ })).not.toBeInTheDocument();
+  expect(screen.queryByText('Speaking', { exact: true })).not.toBeInTheDocument();
 });
 
 it('keeps the exact pending Stop row visible beyond terminal auto-hide until native terminal confirmation', () => {
   vi.useFakeTimers();
   try {
-    const completed = view({label: 'Completed reply', state: 'completed', cancellable:false,
-      resultMessageId:'result-1',
-      presentation:{ref:'speech-1',state:'stop_requested',startedAtMs:1000}});
-    const {rerender} = render(<CallActivity isAgentSpeaking={false} tasks={[completed]} onCancel={vi.fn()} />);
+    const completed = view({
+      label: 'Completed reply',
+      state: 'completed',
+      cancellable: false,
+      resultMessageId: 'result-1',
+      presentation: { ref: 'speech-1', state: 'stop_requested', startedAtMs: 1000 },
+    });
+    const { rerender } = render(
+      <CallActivity isAgentSpeaking={false} tasks={[completed]} onCancel={vi.fn()} />
+    );
     act(() => vi.advanceTimersByTime(20_001));
-    expect(screen.getByText('Stopping speech',{exact:true})).toBeVisible();
+    expect(screen.getByText('Stopping speech', { exact: true })).toBeVisible();
     expect(screen.getByText('Completed reply')).toBeVisible();
-    expect(screen.queryByRole('button',{name:/^Dismiss/})).not.toBeInTheDocument();
-    rerender(<CallActivity isAgentSpeaking={false} tasks={[{...completed,
-      presentation:{ref:'speech-1',state:'interrupted',startedAtMs:1000}}]} onCancel={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: /^Dismiss/ })).not.toBeInTheDocument();
+    rerender(
+      <CallActivity
+        isAgentSpeaking={false}
+        tasks={[
+          {
+            ...completed,
+            presentation: { ref: 'speech-1', state: 'interrupted', startedAtMs: 1000 },
+          },
+        ]}
+        onCancel={vi.fn()}
+      />
+    );
     act(() => vi.advanceTimersByTime(8_001));
     expect(screen.queryByText('Completed reply')).not.toBeInTheDocument();
-  } finally {vi.useRealTimers();}
+  } finally {
+    vi.useRealTimers();
+  }
 });
-
 
 it('allows an exact idempotent speech Stop retry after the request ends while native speech continues', () => {
   const onCancel = vi.fn();
-  const completed = view({label:'Completed reply',state:'completed',cancellable:false,
-    presentation:{ref:'speech-1',state:'stop_requested',startedAtMs:1000}});
-  const {rerender} = render(<CallActivity isAgentSpeaking tasks={[completed]}
-    pendingTaskIds={new Set(['task-1'])} onCancel={onCancel} />);
-  expect(screen.getByRole('button',{name:/^Stop speech/})).toBeDisabled();
-  rerender(<CallActivity isAgentSpeaking tasks={[completed]} pendingTaskIds={new Set()} onCancel={onCancel} />);
-  const stop = screen.getByRole('button',{name:/^Stop speech/});
+  const completed = view({
+    label: 'Completed reply',
+    state: 'completed',
+    cancellable: false,
+    presentation: { ref: 'speech-1', state: 'stop_requested', startedAtMs: 1000 },
+  });
+  const { rerender } = render(
+    <CallActivity
+      isAgentSpeaking
+      tasks={[completed]}
+      pendingTaskIds={new Set(['task-1'])}
+      onCancel={onCancel}
+    />
+  );
+  expect(screen.getByRole('button', { name: /^Stop speech/ })).toBeDisabled();
+  rerender(
+    <CallActivity
+      isAgentSpeaking
+      tasks={[completed]}
+      pendingTaskIds={new Set()}
+      onCancel={onCancel}
+    />
+  );
+  const stop = screen.getByRole('button', { name: /^Stop speech/ });
   expect(stop).toBeEnabled();
   fireEvent.click(stop);
   fireEvent.click(stop);
-  expect(onCancel.mock.calls).toEqual([['task-1','speech-1'],['task-1','speech-1']]);
-  expect(screen.getByText('Stopping speech',{exact:true})).toBeVisible();
+  expect(onCancel.mock.calls).toEqual([
+    ['task-1', 'speech-1'],
+    ['task-1', 'speech-1'],
+  ]);
+  expect(screen.getByText('Stopping speech', { exact: true })).toBeVisible();
   rerender(<CallActivity isAgentSpeaking={false} tasks={[completed]} onCancel={onCancel} />);
-  expect(screen.queryByRole('button',{name:/^Stop speech/})).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /^Stop speech/ })).not.toBeInTheDocument();
 });

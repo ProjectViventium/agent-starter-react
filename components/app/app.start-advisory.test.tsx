@@ -3,12 +3,13 @@
  * remains truthful before and after the native call session mounts.
  * VIVENTIUM END */
 import React from 'react';
+import { RoomEvent } from 'livekit-client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { AppConfig } from '@/app-config';
-let App: typeof import('@/components/app/app').App;
 import { CallRequestError } from '@/lib/call-start';
-import { RoomEvent } from 'livekit-client';
+
+let App: typeof import('@/components/app/app').App;
 
 const state = vi.hoisted(() => ({
   settingsLoading: false,
@@ -36,7 +37,9 @@ const session = {
       if (!roomListeners.has(event)) roomListeners.set(event, new Set());
       roomListeners.get(event)!.add(listener);
     },
-    off: (event: string, listener: () => void) => { roomListeners.get(event)?.delete(listener); },
+    off: (event: string, listener: () => void) => {
+      roomListeners.get(event)?.delete(listener);
+    },
     startAudio: state.startAudio,
     remoteParticipants: new Map(),
     localParticipant: { setMicrophoneEnabled: state.setMicrophoneEnabled },
@@ -62,34 +65,68 @@ vi.mock('@/hooks/useCallSessionVoiceSettings', () => ({
 vi.mock('@/hooks/useCallSessionState', () => ({
   useCallSessionState: (callSessionId: string | null, keepAlive: boolean) => {
     state.stateProbe(callSessionId, keepAlive);
-    return ({
-    mode: 'call',
-    authoritativeStatus: state.knownEnded ? 'ended' : state.statePending ? null : 'created',
-    callStateError: null,
-    callStateIssue: state.stateIssue,
-    modePending: false,
-    setMode: vi.fn(),
-  });
+    return {
+      mode: 'call',
+      authoritativeStatus: state.knownEnded ? 'ended' : state.statePending ? null : 'created',
+      callStateError: null,
+      callStateIssue: state.stateIssue,
+      modePending: false,
+      setMode: vi.fn(),
+    };
   },
 }));
 vi.mock('@/components/app/advanced-voice-settings', () => ({
-  AdvancedVoiceSettings: () => <output aria-label="Advisory settings">{state.settingsLoading ? 'loading' : 'ready'}</output>,
+  AdvancedVoiceSettings: () => (
+    <output aria-label="Advisory settings">{state.settingsLoading ? 'loading' : 'ready'}</output>
+  ),
   ConnectedAdvancedVoiceSettings: () => null,
 }));
 vi.mock('@/components/app/welcome-view', () => ({
-  WelcomeView: ({ startButtonText, onStartCall, startDisabled, helperText, callIssue, callEnded }: {
-    startButtonText: string; onStartCall: () => void; startDisabled: boolean;
-    helperText?: string; callIssue?: { kind: string } | null; callEnded?: boolean;
-  }) => <><button disabled={startDisabled} onClick={onStartCall}>{startButtonText}</button>
-    <output aria-label="Call issue">{callEnded ? '' : callIssue?.kind}</output><output aria-label="Start hint">{helperText}</output><output aria-label="Call ended">{String(callEnded ?? false)}</output></>,
+  WelcomeView: ({
+    startButtonText,
+    onStartCall,
+    startDisabled,
+    helperText,
+    callIssue,
+    callEnded,
+  }: {
+    startButtonText: string;
+    onStartCall: () => void;
+    startDisabled: boolean;
+    helperText?: string;
+    callIssue?: { kind: string } | null;
+    callEnded?: boolean;
+  }) => (
+    <>
+      <button disabled={startDisabled} onClick={onStartCall}>
+        {startButtonText}
+      </button>
+      <output aria-label="Call issue">{callEnded ? '' : callIssue?.kind}</output>
+      <output aria-label="Start hint">{helperText}</output>
+      <output aria-label="Call ended">{String(callEnded ?? false)}</output>
+    </>
+  ),
 }));
 vi.mock('@/components/app/view-controller', () => ({
-  ViewController: ({ canStartCall, onStartCall, callIssue, callEnded }: {
-    canStartCall: boolean; onStartCall: () => void; callIssue?: { kind: string } | null;
+  ViewController: ({
+    canStartCall,
+    onStartCall,
+    callIssue,
+    callEnded,
+  }: {
+    canStartCall: boolean;
+    onStartCall: () => void;
+    callIssue?: { kind: string } | null;
     callEnded: boolean;
-  }) => <><button disabled={!canStartCall} onClick={onStartCall}>Connect</button>
-    <output aria-label="Call issue">{callEnded ? '' : callIssue?.kind}</output>
-    <output aria-label="Call ended">{String(callEnded)}</output></>,
+  }) => (
+    <>
+      <button disabled={!canStartCall} onClick={onStartCall}>
+        Connect
+      </button>
+      <output aria-label="Call issue">{callEnded ? '' : callIssue?.kind}</output>
+      <output aria-label="Call ended">{String(callEnded)}</output>
+    </>
+  ),
 }));
 vi.mock('@/components/livekit/voice-audio-playback-evidence', () => ({
   VoiceAudioPlaybackEvidence: ({ children }: { children: React.ReactNode }) => <>{children}</>,
@@ -101,8 +138,11 @@ vi.mock('@/hooks/useAgentErrors', () => ({ useAgentErrors: () => undefined }));
 vi.mock('@/hooks/useDebug', () => ({ useDebugMode: () => undefined }));
 const appConfig = { agentName: 'synthetic-agent', startButtonText: 'Start call' } as AppConfig;
 function openCall(autoConnect = false) {
-  window.history.replaceState(null, '',
-    `/?callSessionId=call-advisory&roomName=room-advisory&autoConnect=${autoConnect ? '1' : '0'}`);
+  window.history.replaceState(
+    null,
+    '',
+    `/?callSessionId=call-advisory&roomName=room-advisory&autoConnect=${autoConnect ? '1' : '0'}`
+  );
   return render(<App appConfig={appConfig} />);
 }
 beforeEach(async () => {
@@ -125,10 +165,31 @@ beforeEach(async () => {
   state.end.mockReset().mockResolvedValue(undefined);
   state.startAudio.mockReset().mockResolvedValue(undefined);
   state.setMicrophoneEnabled.mockReset().mockResolvedValue(undefined);
-  vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify(state.authorityCode
-    ? { code: state.authorityCode, message: 'Synthetic authority denied Start.' }
-    : { serverUrl: 'ws://livekit.example.com', roomName: 'room-advisory', participantToken: 'synthetic-token', participantIdentity: 'synthetic-owner' }), { status: state.authorityCode ? 409 : 200, headers: { 'Content-Type': 'application/json' } })));
-  vi.stubGlobal('navigator', { permissions: { query: vi.fn().mockResolvedValue({ state: 'granted' }) } });
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify(
+            state.authorityCode
+              ? { code: state.authorityCode, message: 'Synthetic authority denied Start.' }
+              : {
+                  serverUrl: 'ws://livekit.example.com',
+                  roomName: 'room-advisory',
+                  participantToken: 'synthetic-token',
+                  participantIdentity: 'synthetic-owner',
+                }
+          ),
+          {
+            status: state.authorityCode ? 409 : 200,
+            headers: { 'Content-Type': 'application/json' },
+          }
+        )
+    )
+  );
+  vi.stubGlobal('navigator', {
+    permissions: { query: vi.fn().mockResolvedValue({ state: 'granted' }) },
+  });
   ({ App } = await import('@/components/app/app'));
 });
 afterEach(() => vi.unstubAllGlobals());
@@ -164,7 +225,8 @@ describe('advisory settings do not gate authoritative call start', () => {
     await waitFor(() => expect(state.start).toHaveBeenCalledTimes(1));
   });
   it.each(['auth_expired', 'no_route'] as const)(
-    'surfaces authoritative %s rejection without publishing the microphone', async (kind) => {
+    'surfaces authoritative %s rejection without publishing the microphone',
+    async (kind) => {
       state.settingsLoading = true;
       state.emptyRoute = true;
       const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -262,9 +324,15 @@ describe('shared canonical state before native session mount', () => {
 it('releases pending microphone startup on terminal room loss and neutralizes a late grant', async () => {
   const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
   let grant!: () => void;
-  const pending = new Promise<void>((resolve) => { grant = resolve; });
-  state.setMicrophoneEnabled.mockImplementation((enabled: boolean) => enabled ? pending : Promise.resolve());
-  vi.stubGlobal('navigator', { permissions: { query: vi.fn().mockResolvedValue({ state: 'prompt' }) } });
+  const pending = new Promise<void>((resolve) => {
+    grant = resolve;
+  });
+  state.setMicrophoneEnabled.mockImplementation((enabled: boolean) =>
+    enabled ? pending : Promise.resolve()
+  );
+  vi.stubGlobal('navigator', {
+    permissions: { query: vi.fn().mockResolvedValue({ state: 'prompt' }) },
+  });
   state.start.mockImplementation(async () => {
     session.isConnected = true;
     session.connectionState = 'connected';
@@ -279,15 +347,27 @@ it('releases pending microphone startup on terminal room loss and neutralizes a 
       roomListeners.get(RoomEvent.Disconnected)?.forEach((listener) => listener());
       rerender(<App appConfig={appConfig} />);
     });
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Connect' })).toBeEnabled(), { timeout: 500 });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Connect' })).toBeEnabled(), {
+      timeout: 500,
+    });
     expect(screen.getByLabelText('Call issue')).toHaveTextContent('gateway_down');
     expect(state.setMicrophoneEnabled).toHaveBeenCalledWith(false);
     const disables = state.setMicrophoneEnabled.mock.calls.filter(([enabled]) => !enabled).length;
-    await act(async () => { grant(); });
-    await waitFor(() => expect(state.setMicrophoneEnabled.mock.calls.filter(([enabled]) => !enabled).length).toBeGreaterThan(disables));
+    await act(async () => {
+      grant();
+    });
+    await waitFor(() =>
+      expect(
+        state.setMicrophoneEnabled.mock.calls.filter(([enabled]) => !enabled).length
+      ).toBeGreaterThan(disables)
+    );
     expect(state.start).toHaveBeenCalledTimes(1);
     expect(errorLog).toHaveBeenCalledOnce();
-  } finally { await act(async () => { grant(); }); }
+  } finally {
+    await act(async () => {
+      grant();
+    });
+  }
 });
 /* VIVENTIUM END */
 
@@ -297,29 +377,42 @@ it('does not let obsolete late capture cleanup mute a newer explicit Retry', asy
   let grant!: () => void;
   let muted = true;
   let capturePending = true;
-  const pending = new Promise<void>((resolve) => { grant = resolve; });
+  const pending = new Promise<void>((resolve) => {
+    grant = resolve;
+  });
   state.setMicrophoneEnabled.mockImplementation((enabled: boolean) => {
     // Match the SDK's single pending publication: disable and a later enable wait for it.
-    return (capturePending ? pending : Promise.resolve()).then(() => { muted = !enabled; });
+    return (capturePending ? pending : Promise.resolve()).then(() => {
+      muted = !enabled;
+    });
   });
-  vi.stubGlobal('navigator', { permissions: { query: vi.fn().mockResolvedValue({ state: 'prompt' }) } });
+  vi.stubGlobal('navigator', {
+    permissions: { query: vi.fn().mockResolvedValue({ state: 'prompt' }) },
+  });
   state.start.mockImplementation(async () => {
-    session.isConnected = true; session.connectionState = 'connected';
+    session.isConnected = true;
+    session.connectionState = 'connected';
   });
   const { rerender } = openCall(true);
   await waitFor(() => expect(state.setMicrophoneEnabled).toHaveBeenCalledWith(true));
   await act(async () => {
-    session.isConnected = false; session.connectionState = 'disconnected';
+    session.isConnected = false;
+    session.connectionState = 'disconnected';
     roomListeners.get(RoomEvent.Disconnected)?.forEach((listener) => listener());
     rerender(<App appConfig={appConfig} />);
   });
   const retry = screen.getByRole('button', { name: 'Connect' });
   await waitFor(() => expect(retry).toBeEnabled());
   fireEvent.click(retry);
-  await waitFor(() => expect(state.setMicrophoneEnabled.mock.calls.filter(([enabled]) => enabled)).toHaveLength(2));
+  await waitFor(() =>
+    expect(state.setMicrophoneEnabled.mock.calls.filter(([enabled]) => enabled)).toHaveLength(2)
+  );
   expect(state.start).toHaveBeenCalledTimes(2);
   expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
-  await act(async () => { capturePending = false; grant(); });
+  await act(async () => {
+    capturePending = false;
+    grant();
+  });
   await waitFor(() => expect(state.startAudio).toHaveBeenCalledOnce());
   expect(muted).toBe(false);
   expect(state.setMicrophoneEnabled.mock.calls.filter(([enabled]) => !enabled)).toHaveLength(1);
@@ -329,26 +422,46 @@ it.each([false, true])('keeps cold-start reclaim truthful when terminal=%s', asy
   vi.useFakeTimers();
   vi.spyOn(console, 'error').mockImplementation(() => undefined);
   let grant!: () => void;
-  const pending = new Promise<void>((resolve) => { grant = resolve; });
-  state.setMicrophoneEnabled.mockImplementation((enabled: boolean) => enabled && terminal ? pending : Promise.resolve());
-  vi.stubGlobal('navigator', { permissions: { query: vi.fn().mockResolvedValue({ state: terminal ? 'prompt' : 'granted' }) } });
+  const pending = new Promise<void>((resolve) => {
+    grant = resolve;
+  });
+  state.setMicrophoneEnabled.mockImplementation((enabled: boolean) =>
+    enabled && terminal ? pending : Promise.resolve()
+  );
+  vi.stubGlobal('navigator', {
+    permissions: { query: vi.fn().mockResolvedValue({ state: terminal ? 'prompt' : 'granted' }) },
+  });
   state.start.mockImplementation(async () => {
-    session.isConnected = true; session.connectionState = 'connected';
+    session.isConnected = true;
+    session.connectionState = 'connected';
   });
   try {
-    await act(async () => { openCall(true); });
-    await act(async () => { await Promise.resolve(); });
+    await act(async () => {
+      openCall(true);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(state.setMicrophoneEnabled).toHaveBeenCalledWith(true);
     if (terminal) {
       // The terminal event is synchronous; the connected SDK snapshot may still be stale.
-      await act(async () => { roomListeners.get(RoomEvent.Disconnected)?.forEach((listener) => listener()); });
+      await act(async () => {
+        roomListeners.get(RoomEvent.Disconnected)?.forEach((listener) => listener());
+      });
     }
-    await act(async () => { await vi.advanceTimersByTimeAsync(8_001); });
-    const reclaims = vi.mocked(fetch).mock.calls.filter(([, options]) =>
-      JSON.parse(String(options?.body ?? '{}')).reclaimDispatch === true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(8_001);
+    });
+    const reclaims = vi
+      .mocked(fetch)
+      .mock.calls.filter(
+        ([, options]) => JSON.parse(String(options?.body ?? '{}')).reclaimDispatch === true
+      );
     expect(reclaims).toHaveLength(terminal ? 0 : 1);
   } finally {
-    await act(async () => { grant(); });
+    await act(async () => {
+      grant();
+    });
     vi.useRealTimers();
   }
 });
@@ -357,21 +470,34 @@ it.each([false, true])('keeps cold-start reclaim truthful when terminal=%s', asy
 it('does not automatically reclaim dispatch while a browser permission prompt remains pending', async () => {
   vi.useFakeTimers();
   let grant!: () => void;
-  const pending = new Promise<void>((resolve) => { grant = resolve; });
-  state.setMicrophoneEnabled.mockImplementation((enabled: boolean) => enabled ? pending : Promise.resolve());
-  vi.stubGlobal('navigator', { permissions: { query: vi.fn().mockResolvedValue({ state: 'prompt' }) } });
+  const pending = new Promise<void>((resolve) => {
+    grant = resolve;
+  });
+  state.setMicrophoneEnabled.mockImplementation((enabled: boolean) =>
+    enabled ? pending : Promise.resolve()
+  );
+  vi.stubGlobal('navigator', {
+    permissions: { query: vi.fn().mockResolvedValue({ state: 'prompt' }) },
+  });
   state.start.mockImplementation(async () => {
-    session.isConnected = true; session.connectionState = 'connected';
+    session.isConnected = true;
+    session.connectionState = 'connected';
   });
   try {
-    await act(async () => { openCall(true); });
-    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    await act(async () => {
+      openCall(true);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
     expect(state.start).toHaveBeenCalledOnce();
     expect(screen.getByRole('button', { name: 'Connect' })).toBeDisabled();
     expect(vi.mocked(fetch)).toHaveBeenCalledOnce();
     expect(state.setMicrophoneEnabled).not.toHaveBeenCalledWith(false);
   } finally {
-    await act(async () => { grant(); });
+    await act(async () => {
+      grant();
+    });
     vi.useRealTimers();
   }
 });
@@ -379,8 +505,16 @@ it('does not automatically reclaim dispatch while a browser permission prompt re
 /* VIVENTIUM START: React effect replay does not terminate a fresh one-click call. */
 it('auto-starts once across React Strict Mode effect replay without a terminal room event', async () => {
   const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-  window.history.replaceState(null, '', '/?callSessionId=call-advisory&roomName=room-advisory&autoConnect=1');
-  render(<React.StrictMode><App appConfig={appConfig} /></React.StrictMode>);
+  window.history.replaceState(
+    null,
+    '',
+    '/?callSessionId=call-advisory&roomName=room-advisory&autoConnect=1'
+  );
+  render(
+    <React.StrictMode>
+      <App appConfig={appConfig} />
+    </React.StrictMode>
+  );
   await waitFor(() => expect(state.startAudio).toHaveBeenCalledOnce(), { timeout: 500 });
   expect(state.start).toHaveBeenCalledOnce();
   expect(state.setMicrophoneEnabled).toHaveBeenCalledWith(true);
@@ -393,14 +527,24 @@ it('auto-starts once across React Strict Mode effect replay without a terminal r
 it('cancels pending capture on real unmount and neutralizes a late browser grant', async () => {
   vi.spyOn(console, 'error').mockImplementation(() => undefined);
   let grant!: () => void;
-  const pending = new Promise<void>((resolve) => { grant = resolve; });
-  state.setMicrophoneEnabled.mockImplementation((enabled: boolean) => enabled ? pending : Promise.resolve());
-  vi.stubGlobal('navigator', { permissions: { query: vi.fn().mockResolvedValue({ state: 'prompt' }) } });
+  const pending = new Promise<void>((resolve) => {
+    grant = resolve;
+  });
+  state.setMicrophoneEnabled.mockImplementation((enabled: boolean) =>
+    enabled ? pending : Promise.resolve()
+  );
+  vi.stubGlobal('navigator', {
+    permissions: { query: vi.fn().mockResolvedValue({ state: 'prompt' }) },
+  });
   const { unmount } = openCall(true);
   await waitFor(() => expect(state.setMicrophoneEnabled).toHaveBeenCalledWith(true));
-  await act(async () => { unmount(); });
+  await act(async () => {
+    unmount();
+  });
   expect(state.setMicrophoneEnabled.mock.calls.filter(([enabled]) => !enabled)).toHaveLength(1);
-  await act(async () => { grant(); });
+  await act(async () => {
+    grant();
+  });
   expect(state.setMicrophoneEnabled.mock.calls.filter(([enabled]) => !enabled)).toHaveLength(2);
   expect(state.startAudio).not.toHaveBeenCalled();
   expect(vi.mocked(fetch)).toHaveBeenCalledOnce();

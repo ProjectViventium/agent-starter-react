@@ -30,7 +30,13 @@ type ResultFilesReadReason =
   | 'read_failed';
 
 type ResultFilesReadTrace = {
-  stage: 'fetch_started' | 'http_response' | 'validation' | 'accepted' | 'read_skipped' | 'read_failed';
+  stage:
+    | 'fetch_started'
+    | 'http_response'
+    | 'validation'
+    | 'accepted'
+    | 'read_skipped'
+    | 'read_failed';
   expectedSequence: number;
   httpStatus?: number;
   reason?: ResultFilesReadReason;
@@ -122,7 +128,11 @@ function ResultFiles({ task }: { task: VoiceTaskView }) {
             acceptedCount: (names as string[]).length,
           });
         } else {
-          traceResultFilesRead({ stage: 'read_skipped', expectedSequence: sequence, reason: 'disposed' });
+          traceResultFilesRead({
+            stage: 'read_skipped',
+            expectedSequence: sequence,
+            reason: 'disposed',
+          });
         }
       } catch {
         traceResultFilesRead(

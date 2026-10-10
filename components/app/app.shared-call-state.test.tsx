@@ -6,8 +6,9 @@ import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { AppConfig } from '@/app-config';
-let App: typeof import('@/components/app/app').App;
 import { CallRequestError } from '@/lib/call-start';
+
+let App: typeof import('@/components/app/app').App;
 
 const state = vi.hoisted(() => ({
   settingsLoading: false,
@@ -31,15 +32,18 @@ const session = {
   start: state.start,
   end: state.end,
   room: {
-      on: vi.fn(),
-      off: vi.fn(),
+    on: vi.fn(),
+    off: vi.fn(),
     startAudio: state.startAudio,
     remoteParticipants: new Map(),
     localParticipant: { setMicrophoneEnabled: state.setMicrophoneEnabled },
   },
 };
 vi.mock('@livekit/components-react', () => ({
-  useSession: () => { state.nativeSessionMounts++; return session; },
+  useSession: () => {
+    state.nativeSessionMounts++;
+    return session;
+  },
   SessionProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   RoomAudioRenderer: () => null,
 }));
@@ -56,23 +60,57 @@ vi.mock('@/hooks/useCallSessionVoiceSettings', () => ({
   }),
 }));
 vi.mock('@/components/app/advanced-voice-settings', () => ({
-  AdvancedVoiceSettings: () => <output aria-label="Advisory settings">{state.settingsLoading ? 'loading' : 'ready'}</output>,
+  AdvancedVoiceSettings: () => (
+    <output aria-label="Advisory settings">{state.settingsLoading ? 'loading' : 'ready'}</output>
+  ),
   ConnectedAdvancedVoiceSettings: () => null,
 }));
 vi.mock('@/components/app/welcome-view', () => ({
-  WelcomeView: ({ startButtonText, onStartCall, startDisabled, helperText, callIssue, callEnded }: {
-    startButtonText: string; onStartCall: () => void; startDisabled: boolean;
-    helperText?: string; callIssue?: { kind: string } | null; callEnded?: boolean;
-  }) => <><button disabled={startDisabled} onClick={onStartCall}>{startButtonText}</button>
-    <output aria-label="Call issue">{callEnded ? '' : callIssue?.kind}</output><output aria-label="Start hint">{helperText}</output><output aria-label="Call ended">{String(callEnded ?? false)}</output></>,
+  WelcomeView: ({
+    startButtonText,
+    onStartCall,
+    startDisabled,
+    helperText,
+    callIssue,
+    callEnded,
+  }: {
+    startButtonText: string;
+    onStartCall: () => void;
+    startDisabled: boolean;
+    helperText?: string;
+    callIssue?: { kind: string } | null;
+    callEnded?: boolean;
+  }) => (
+    <>
+      <button disabled={startDisabled} onClick={onStartCall}>
+        {startButtonText}
+      </button>
+      <output aria-label="Call issue">{callEnded ? '' : callIssue?.kind}</output>
+      <output aria-label="Start hint">{helperText}</output>
+      <output aria-label="Call ended">{String(callEnded ?? false)}</output>
+    </>
+  ),
 }));
 vi.mock('@/components/app/view-controller', () => ({
-  ViewController: ({ canStartCall, onStartCall, callIssue, callEnded }: {
-    canStartCall: boolean; onStartCall: () => void; callIssue?: { kind: string } | null;
+  ViewController: ({
+    canStartCall,
+    onStartCall,
+    callIssue,
+    callEnded,
+  }: {
+    canStartCall: boolean;
+    onStartCall: () => void;
+    callIssue?: { kind: string } | null;
     callEnded: boolean;
-  }) => <><button disabled={!canStartCall} onClick={onStartCall}>Connect</button>
-    <output aria-label="Call issue">{callEnded ? '' : callIssue?.kind}</output>
-    <output aria-label="Call ended">{String(callEnded)}</output></>,
+  }) => (
+    <>
+      <button disabled={!canStartCall} onClick={onStartCall}>
+        Connect
+      </button>
+      <output aria-label="Call issue">{callEnded ? '' : callIssue?.kind}</output>
+      <output aria-label="Call ended">{String(callEnded)}</output>
+    </>
+  ),
 }));
 vi.mock('@/components/livekit/voice-audio-playback-evidence', () => ({
   VoiceAudioPlaybackEvidence: ({ children }: { children: React.ReactNode }) => <>{children}</>,
@@ -82,11 +120,14 @@ vi.mock('@/hooks/useConnectionRecovery', () => ({ useConnectionRecovery: () => u
 vi.mock('@/hooks/useWakeLock', () => ({ useWakeLock: () => undefined }));
 vi.mock('@/hooks/useAgentErrors', () => ({ useAgentErrors: () => undefined }));
 vi.mock('@/hooks/useDebug', () => ({ useDebugMode: () => undefined }));
-let heldState: {promise: Promise<Response>; resolve: (response: Response) => void} | null = null;
+let heldState: { promise: Promise<Response>; resolve: (response: Response) => void } | null = null;
 const appConfig = { agentName: 'synthetic-agent', startButtonText: 'Start call' } as AppConfig;
 function openCall(autoConnect = false) {
-  window.history.replaceState(null, '',
-    `/?callSessionId=call-advisory&roomName=room-advisory&autoConnect=${autoConnect ? '1' : '0'}`);
+  window.history.replaceState(
+    null,
+    '',
+    `/?callSessionId=call-advisory&roomName=room-advisory&autoConnect=${autoConnect ? '1' : '0'}`
+  );
   return render(<App appConfig={appConfig} />);
 }
 beforeEach(async () => {
@@ -110,23 +151,60 @@ beforeEach(async () => {
   state.end.mockReset().mockResolvedValue(undefined);
   state.startAudio.mockReset().mockResolvedValue(undefined);
   state.setMicrophoneEnabled.mockReset().mockResolvedValue(undefined);
-  vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: unknown) => {
-    if (String(input).startsWith('/api/call-session-state?')) {
-      if (heldState) return heldState.promise;
-      return new Response(JSON.stringify({version: 1, callSessionId: 'call-advisory',
-        mode: 'call', status: state.knownEnded ? 'ended' : 'created', revision: 1,
-        updatedAt: '2026-08-09T12:00:00.000Z'}), {status: 200});
-    }
-    return new Response(JSON.stringify({serverUrl: 'ws://livekit.example.com',
-      roomName: 'room-advisory', participantToken: 'synthetic-token', participantIdentity: 'synthetic-owner'}), {status: 200});
-  }));
-  vi.stubGlobal('navigator', { permissions: { query: vi.fn().mockResolvedValue({ state: 'granted' }) } });
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockImplementation(async (input: unknown) => {
+      if (String(input).startsWith('/api/call-session-state?')) {
+        if (heldState) return heldState.promise;
+        return new Response(
+          JSON.stringify({
+            version: 1,
+            callSessionId: 'call-advisory',
+            mode: 'call',
+            status: state.knownEnded ? 'ended' : 'created',
+            revision: 1,
+            updatedAt: '2026-08-09T12:00:00.000Z',
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          serverUrl: 'ws://livekit.example.com',
+          roomName: 'room-advisory',
+          participantToken: 'synthetic-token',
+          participantIdentity: 'synthetic-owner',
+        }),
+        { status: 200 }
+      );
+    })
+  );
+  vi.stubGlobal('navigator', {
+    permissions: { query: vi.fn().mockResolvedValue({ state: 'granted' }) },
+  });
   ({ App } = await import('@/components/app/app'));
 });
-afterEach(() => {heldState?.resolve(new Response(JSON.stringify({version: 1, callSessionId: 'call-advisory', mode: 'call', status: 'created', revision: 1, updatedAt: '2026-08-09T12:00:00.000Z'}),{status:200}));vi.unstubAllGlobals();});
+afterEach(() => {
+  heldState?.resolve(
+    new Response(
+      JSON.stringify({
+        version: 1,
+        callSessionId: 'call-advisory',
+        mode: 'call',
+        status: 'created',
+        revision: 1,
+        updatedAt: '2026-08-09T12:00:00.000Z',
+      }),
+      { status: 200 }
+    )
+  );
+  vi.unstubAllGlobals();
+});
 
-const stateReads = () => vi.mocked(fetch).mock.calls.filter(([url]) => String(url).startsWith('/api/call-session-state?'));
-const tokenReads = () => vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === '/api/connection-details');
+const stateReads = () =>
+  vi.mocked(fetch).mock.calls.filter(([url]) => String(url).startsWith('/api/call-session-state?'));
+const tokenReads = () =>
+  vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === '/api/connection-details');
 describe('App uses the original canonical state hook across setup and live phases', () => {
   it('loads one actual typed Ended state before manual Start without mounting the native session', async () => {
     state.knownEnded = true;
@@ -142,7 +220,12 @@ describe('App uses the original canonical state hook across setup and live phase
   });
   it('keeps a pending presentation read in the same hook when manual Start mounts the session', async () => {
     let resolve!: (response: Response) => void;
-    heldState = {promise: new Promise<Response>(next => {resolve=next;}), resolve: response=>resolve(response)};
+    heldState = {
+      promise: new Promise<Response>((next) => {
+        resolve = next;
+      }),
+      resolve: (response) => resolve(response),
+    };
     state.settingsLoading = true;
     openCall(false);
     await waitFor(() => expect(stateReads()).toHaveLength(1));

@@ -10,12 +10,12 @@ import {
   SpeakerTranscript,
 } from '@/components/app/call-activity';
 import { CallIssueNotice } from '@/components/app/call-issue-notice';
-import { CallResultFiles } from '@/components/app/call-result-files';
 import {
   type AccessibleCallStatus,
   CallStatusIndicator,
   LISTEN_ONLY_PRECONNECT_MESSAGE,
 } from '@/components/app/call-mode-control';
+import { CallResultFiles } from '@/components/app/call-result-files';
 import { ChatTranscript } from '@/components/app/chat-transcript';
 import { PreConnectMessage } from '@/components/app/preconnect-message';
 import { TileLayout } from '@/components/app/tile-layout';
@@ -309,7 +309,9 @@ export const SessionView = ({
         ) : null}
         <CallActivity
           mode={mode}
-          isAgentSpeaking={agent.state === 'speaking' && !durableTerminalStatus && mode !== 'listen_only'}
+          isAgentSpeaking={
+            agent.state === 'speaking' && !durableTerminalStatus && mode !== 'listen_only'
+          }
           tasks={tasks}
           onCancel={(taskId, presentationRef) => void taskActions.cancel(taskId, presentationRef)}
           onRetry={(taskId) => void taskActions.retry(taskId)}

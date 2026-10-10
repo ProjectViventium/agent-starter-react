@@ -110,14 +110,25 @@ describe('one-click microphone startup policy', () => {
 
 /* VIVENTIUM START: Permission can wait, but a terminal call cannot retain capture ownership. */
 it.each(['prompt', 'unsupported', 'granted'] as const)(
-  'cancels %s capture only on terminal signal and disables a late grant', async (permissionState) => {
+  'cancels %s capture only on terminal signal and disables a late grant',
+  async (permissionState) => {
     const pending = deferred();
     const controller = new AbortController();
     const disable = vi.fn().mockResolvedValue(undefined);
-    const startup = enableCallMicrophone({ permissionState, signal: controller.signal,
-      enable: () => pending.promise, disable, grantedTimeoutMs: 60_000 });
-    const rejected = expect(startup).rejects.toMatchObject({ code: 'gateway_down', retryable: true });
-    controller.abort(new CallRequestError({ kind: 'gateway_down', message: 'Synthetic room loss.' }, true));
+    const startup = enableCallMicrophone({
+      permissionState,
+      signal: controller.signal,
+      enable: () => pending.promise,
+      disable,
+      grantedTimeoutMs: 60_000,
+    });
+    const rejected = expect(startup).rejects.toMatchObject({
+      code: 'gateway_down',
+      retryable: true,
+    });
+    controller.abort(
+      new CallRequestError({ kind: 'gateway_down', message: 'Synthetic room loss.' }, true)
+    );
     await rejected;
     expect(disable).toHaveBeenCalledTimes(1);
     pending.resolve();
@@ -128,11 +139,20 @@ it.each(['prompt', 'unsupported', 'granted'] as const)(
 );
 it('does not begin capture after its room attempt is already terminal', async () => {
   const controller = new AbortController();
-  controller.abort(new CallRequestError({ kind: 'gateway_down', message: 'Synthetic room loss.' }, true));
+  controller.abort(
+    new CallRequestError({ kind: 'gateway_down', message: 'Synthetic room loss.' }, true)
+  );
   const enable = vi.fn().mockResolvedValue(undefined);
   const disable = vi.fn().mockResolvedValue(undefined);
-  await expect(enableCallMicrophone({ permissionState: 'prompt', signal: controller.signal,
-    enable, disable, grantedTimeoutMs: 25 })).rejects.toMatchObject({ code: 'gateway_down' });
+  await expect(
+    enableCallMicrophone({
+      permissionState: 'prompt',
+      signal: controller.signal,
+      enable,
+      disable,
+      grantedTimeoutMs: 25,
+    })
+  ).rejects.toMatchObject({ code: 'gateway_down' });
   expect(enable).not.toHaveBeenCalled();
   expect(disable).not.toHaveBeenCalled();
 });

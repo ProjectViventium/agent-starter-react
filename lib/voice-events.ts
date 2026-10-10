@@ -352,12 +352,17 @@ export function parseTaskEvent(input: string | unknown): VoiceTaskEventV1 | null
 
   if (value.presentation !== undefined) {
     const presentation = value.presentation;
-    if (!isRecord(presentation) || Object.keys(presentation).length !== 3 ||
+    if (
+      !isRecord(presentation) ||
+      Object.keys(presentation).length !== 3 ||
       !isBoundedString(presentation.ref, 160) ||
       typeof presentation.state !== 'string' ||
-      !['speaking', 'stop_requested', 'completed', 'interrupted', 'failed', 'superseded']
-        .includes(presentation.state) ||
-      !isNonNegativeInteger(presentation.startedAtMs) || presentation.startedAtMs === 0) {
+      !['speaking', 'stop_requested', 'completed', 'interrupted', 'failed', 'superseded'].includes(
+        presentation.state
+      ) ||
+      !isNonNegativeInteger(presentation.startedAtMs) ||
+      presentation.startedAtMs === 0
+    ) {
       return null;
     }
   }

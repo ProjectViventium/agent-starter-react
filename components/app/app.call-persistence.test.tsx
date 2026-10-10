@@ -2,8 +2,9 @@ import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { AppConfig } from '@/app-config';
-let App: typeof import('@/components/app/app').App;
 import { CallRequestError } from '@/lib/call-start';
+
+let App: typeof import('@/components/app/app').App;
 
 const state = vi.hoisted(() => ({
   enabled: false,
@@ -29,8 +30,8 @@ const session = {
   start: state.start,
   end: state.end,
   room: {
-      on: vi.fn(),
-      off: vi.fn(),
+    on: vi.fn(),
+    off: vi.fn(),
     startAudio: state.startAudio,
     remoteParticipants: new Map(),
     localParticipant: { setMicrophoneEnabled: state.setMicrophoneEnabled },
@@ -168,27 +169,36 @@ beforeEach(async () => {
   state.saveAudioInputEnabled.mockClear();
   vi.stubGlobal(
     'fetch',
-    vi.fn().mockImplementation(
-      async (url: string, options?: RequestInit) => {
-        if (url === '/api/connection-details') {
-          const body = JSON.parse(String(options?.body ?? '{}')) as { agentMetadata?: string };
-          const callSessionId = JSON.parse(body.agentMetadata ?? '{}').callSessionId as string;
-          const rejected = state.responseStatus !== 200 || state.payload.status === 'ended' ||
-            state.payload.callSessionId !== callSessionId;
-          return new Response(JSON.stringify(rejected
-            ? { code: 'auth_expired', message: 'Synthetic canonical admission rejected.' }
-            : { serverUrl: 'ws://livekit.example.com', roomName: 'room-current',
-                participantToken: 'synthetic-token', participantIdentity: 'synthetic-owner' }), {
+    vi.fn().mockImplementation(async (url: string, options?: RequestInit) => {
+      if (url === '/api/connection-details') {
+        const body = JSON.parse(String(options?.body ?? '{}')) as { agentMetadata?: string };
+        const callSessionId = JSON.parse(body.agentMetadata ?? '{}').callSessionId as string;
+        const rejected =
+          state.responseStatus !== 200 ||
+          state.payload.status === 'ended' ||
+          state.payload.callSessionId !== callSessionId;
+        return new Response(
+          JSON.stringify(
+            rejected
+              ? { code: 'auth_expired', message: 'Synthetic canonical admission rejected.' }
+              : {
+                  serverUrl: 'ws://livekit.example.com',
+                  roomName: 'room-current',
+                  participantToken: 'synthetic-token',
+                  participantIdentity: 'synthetic-owner',
+                }
+          ),
+          {
             status: rejected ? (state.responseStatus !== 200 ? state.responseStatus : 410) : 200,
             headers: { 'Content-Type': 'application/json' },
-          });
-        }
-        return new Response(JSON.stringify(state.payload), {
-          status: state.responseStatus,
-          headers: { 'Content-Type': 'application/json' },
-        });
+          }
+        );
       }
-    )
+      return new Response(JSON.stringify(state.payload), {
+        status: state.responseStatus,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    })
   );
   vi.stubGlobal('navigator', {
     permissions: { query: vi.fn().mockResolvedValue({ state: 'granted' }) },
@@ -208,7 +218,10 @@ describe('call microphone persistence and terminal bootstrap', () => {
     state.start.mockClear();
     openCall();
     await waitFor(() => expect(state.startAudio).toHaveBeenCalledTimes(2));
-    expect(state.start).toHaveBeenCalledWith({ signal: expect.any(AbortSignal), tracks: { microphone: { enabled: false } } });
+    expect(state.start).toHaveBeenCalledWith({
+      signal: expect.any(AbortSignal),
+      tracks: { microphone: { enabled: false } },
+    });
     expect(state.setMicrophoneEnabled).not.toHaveBeenCalledWith(true);
     expect(state.enabled).toBe(false);
     expect(screen.getByLabelText('Call scope')).toHaveTextContent('call-current');
@@ -288,9 +301,9 @@ describe('call microphone persistence and terminal bootstrap', () => {
       expect(screen.getByLabelText('Call ended')).toHaveTextContent('false');
       expect(screen.getByLabelText('Can start')).toHaveTextContent('false');
       expect(state.start).not.toHaveBeenCalled();
-    expect(state.roomConnect).not.toHaveBeenCalled();
-    expect(state.setMicrophoneEnabled).not.toHaveBeenCalled();
-    expect(state.startAudio).not.toHaveBeenCalled();
+      expect(state.roomConnect).not.toHaveBeenCalled();
+      expect(state.setMicrophoneEnabled).not.toHaveBeenCalled();
+      expect(state.startAudio).not.toHaveBeenCalled();
     }
   );
 });
@@ -324,9 +337,9 @@ describe('authoritative End without redundant native disconnect', () => {
       rerender(<App appConfig={appConfig} />);
       expect(state.end).toHaveBeenCalledTimes(1);
       expect(state.start).not.toHaveBeenCalled();
-    expect(state.roomConnect).not.toHaveBeenCalled();
-    expect(state.setMicrophoneEnabled).not.toHaveBeenCalled();
-    expect(state.startAudio).not.toHaveBeenCalled();
+      expect(state.roomConnect).not.toHaveBeenCalled();
+      expect(state.setMicrophoneEnabled).not.toHaveBeenCalled();
+      expect(state.startAudio).not.toHaveBeenCalled();
     }
   );
 
@@ -379,12 +392,13 @@ describe('authoritative End without redundant native disconnect', () => {
   });
 });
 
-
 describe('canonical admission before native room startup', () => {
   it('uses the same cached token for admission and the native room start without another request', async () => {
     openCall();
     await waitFor(() => expect(state.roomConnect).toHaveBeenCalledTimes(1));
-    const requests = vi.mocked(fetch).mock.calls.filter(([url]) => url === '/api/connection-details');
+    const requests = vi
+      .mocked(fetch)
+      .mock.calls.filter(([url]) => url === '/api/connection-details');
     expect(requests).toHaveLength(1);
     expect(state.start).toHaveBeenCalledTimes(1);
   });

@@ -111,31 +111,25 @@ describe('useCallSessionVoiceSettings immutable route preflight', () => {
       providerLabel: ' xPerfect ',
       modelLabel: ' Grok / Grok 4.7 Fast ',
     };
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            requestedVoiceRoute: {},
-            savedVoiceRoute: {},
-            selectionVoiceRoute: metadata,
-            assistantRoute: {
-              primary: assignment,
-              effective: assignment,
-              inheritsPrimary: true,
-            },
-          }),
-          { status: 200 },
-        ),
-      );
-    vi.stubGlobal('fetch', fetchMock);
-    const { result } = renderHook(() =>
-      useCallSessionVoiceSettings('synthetic-call', metadata),
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          requestedVoiceRoute: {},
+          savedVoiceRoute: {},
+          selectionVoiceRoute: metadata,
+          assistantRoute: {
+            primary: assignment,
+            effective: assignment,
+            inheritsPrimary: true,
+          },
+        }),
+        { status: 200 }
+      )
     );
+    vi.stubGlobal('fetch', fetchMock);
+    const { result } = renderHook(() => useCallSessionVoiceSettings('synthetic-call', metadata));
     await waitFor(() =>
-      expect(result.current.assistantRoute?.effective.providerLabel).toBe(
-        'xPerfect',
-      ),
+      expect(result.current.assistantRoute?.effective.providerLabel).toBe('xPerfect')
     );
     expect(result.current.assistantRoute?.effective).toEqual({
       ...assignment,
@@ -155,31 +149,25 @@ describe('useCallSessionVoiceSettings immutable route preflight', () => {
     };
     vi.stubGlobal(
       'fetch',
-      vi
-        .fn()
-        .mockResolvedValue(
-          new Response(
-            JSON.stringify({
-              requestedVoiceRoute: {},
-              savedVoiceRoute: {},
-              selectionVoiceRoute: metadata,
-              assistantRoute: {
-                primary: assignment,
-                effective: assignment,
-                inheritsPrimary: true,
-              },
-            }),
-            { status: 200 },
-          ),
-        ),
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            requestedVoiceRoute: {},
+            savedVoiceRoute: {},
+            selectionVoiceRoute: metadata,
+            assistantRoute: {
+              primary: assignment,
+              effective: assignment,
+              inheritsPrimary: true,
+            },
+          }),
+          { status: 200 }
+        )
+      )
     );
-    const { result } = renderHook(() =>
-      useCallSessionVoiceSettings('synthetic-call', metadata),
-    );
+    const { result } = renderHook(() => useCallSessionVoiceSettings('synthetic-call', metadata));
     await waitFor(() =>
-      expect(result.current.assistantRoute?.effective.model).toBe(
-        'unknown-model',
-      ),
+      expect(result.current.assistantRoute?.effective.model).toBe('unknown-model')
     );
     expect(result.current.assistantRoute?.effective).toEqual({
       provider: 'unknown-provider',

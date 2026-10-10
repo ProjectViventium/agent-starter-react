@@ -79,18 +79,30 @@ describe('call-end token source fence', () => {
   });
 });
 
-
 describe('cached call token scope', () => {
   it('does not use another call token when the next call authority rejects admission', async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        serverUrl: 'ws://livekit.example.com', roomName: 'room-cache-owner',
-        participantToken: 'synthetic-token-owner', participantIdentity: 'synthetic-owner',
-      }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 'auth_expired',
-        message: 'Synthetic call authority rejected.' }), {
-        status: 403, headers: { 'Content-Type': 'application/json' },
-      }));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            serverUrl: 'ws://livekit.example.com',
+            roomName: 'room-cache-owner',
+            participantToken: 'synthetic-token-owner',
+            participantIdentity: 'synthetic-owner',
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ code: 'auth_expired', message: 'Synthetic call authority rejected.' }),
+          {
+            status: 403,
+            headers: { 'Content-Type': 'application/json' },
+          }
+        )
+      );
     vi.stubGlobal('fetch', fetchMock);
     const metadata = (id: string) => ({
       agentMetadata: JSON.stringify({ callSessionId: id }),
@@ -110,10 +122,18 @@ describe('cached call token scope', () => {
 it('refreshes expired preparation and explicit Retry once while passive SDK fetches reuse it', async () => {
   let now = 1_000;
   vi.spyOn(Date, 'now').mockImplementation(() => now);
-  const request = vi.fn().mockImplementation(async () => new Response(JSON.stringify({
-    serverUrl: 'ws://livekit.example.com', roomName: 'room-explicit-refresh',
-    participantToken: 'synthetic-token', participantIdentity: 'synthetic-owner',
-  }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+  const request = vi.fn().mockImplementation(
+    async () =>
+      new Response(
+        JSON.stringify({
+          serverUrl: 'ws://livekit.example.com',
+          roomName: 'room-explicit-refresh',
+          participantToken: 'synthetic-token',
+          participantIdentity: 'synthetic-owner',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+  );
   vi.stubGlobal('fetch', request);
   const options = { agentMetadata: JSON.stringify({ callSessionId: 'call-explicit-refresh' }) };
   const source = getConnectionDetailsTokenSource(options);

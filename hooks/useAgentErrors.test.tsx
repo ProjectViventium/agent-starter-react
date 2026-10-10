@@ -128,9 +128,13 @@ describe('agent failure transition', () => {
 /* VIVENTIUM START: Terminal startup ownership ends before the SDK teardown side effect. */
 it('signals terminal startup once before ending the installed session', () => {
   const order: string[] = [];
-  const failed = vi.fn(() => { order.push('terminal'); });
+  const failed = vi.fn(() => {
+    order.push('terminal');
+  });
   state.agent = { state: 'failed', failureReasons: ['Synthetic failure.'] };
-  state.end.mockImplementation(async () => { order.push('end'); });
+  state.end.mockImplementation(async () => {
+    order.push('end');
+  });
   const { rerender } = renderHook(() => useAgentErrors(failed));
   rerender();
   expect(order).toEqual(['terminal', 'end']);

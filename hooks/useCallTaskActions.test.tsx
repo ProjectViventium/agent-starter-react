@@ -412,21 +412,38 @@ describe('useCallTaskActions', () => {
   });
 });
 
-
 describe('completed native speech Stop action', () => {
   it('forwards exact ref and accepts completed-control event without fabricating cancellation', async () => {
-    const event = {version: 1, eventId: 'playout-stop', sequence: 2,
-      emittedAt: '2026-08-10T02:00:00.000Z', callSessionId: 'call-1', taskId: 'task-1',
-      type: 'state', state: 'completed', cancellable: false, retryable: false,
-      presentation: {ref: 'speech-1', state: 'stop_requested', startedAtMs: 1000}};
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({version: 1,
-      outcome: 'playout_stop_requested', event}), {status: 200}));
+    const event = {
+      version: 1,
+      eventId: 'playout-stop',
+      sequence: 2,
+      emittedAt: '2026-08-10T02:00:00.000Z',
+      callSessionId: 'call-1',
+      taskId: 'task-1',
+      type: 'state',
+      state: 'completed',
+      cancellable: false,
+      retryable: false,
+      presentation: { ref: 'speech-1', state: 'stop_requested', startedAtMs: 1000 },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ version: 1, outcome: 'playout_stop_requested', event }), {
+          status: 200,
+        })
+      );
     vi.stubGlobal('fetch', fetchMock);
     const onEvent = vi.fn();
-    const {result} = renderHook(() => useCallTaskActions('call-1', onEvent));
-    await act(async () => {expect(await result.current.cancel('task-1', 'speech-1')).toBe(true);});
-    expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toEqual(
-      {callSessionId: 'call-1', presentationRef: 'speech-1'});
+    const { result } = renderHook(() => useCallTaskActions('call-1', onEvent));
+    await act(async () => {
+      expect(await result.current.cancel('task-1', 'speech-1')).toBe(true);
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toEqual({
+      callSessionId: 'call-1',
+      presentationRef: 'speech-1',
+    });
     expect(onEvent).toHaveBeenCalledWith(event);
     expect(result.current.actionError).toBeNull();
   });

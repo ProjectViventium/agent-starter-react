@@ -97,9 +97,12 @@ function TaskItem({
   const [input, setInput] = React.useState('');
   const label = taskLabel(task);
   const progress = task.progress;
-  const statusLabel = stopSpeech && task.state === 'completed' && task.presentation?.state === 'speaking'
-    ? 'Speaking' : task.state === 'completed' && task.presentation?.state === 'stop_requested'
-      ? 'Stopping speech' : TASK_STATE_LABELS[task.state];
+  const statusLabel =
+    stopSpeech && task.state === 'completed' && task.presentation?.state === 'speaking'
+      ? 'Speaking'
+      : task.state === 'completed' && task.presentation?.state === 'stop_requested'
+        ? 'Stopping speech'
+        : TASK_STATE_LABELS[task.state];
   const phase = taskPhase(task);
   const showPhase = phase !== label && phase !== statusLabel;
 
@@ -227,8 +230,9 @@ function TaskItem({
               variant="outline"
               size="sm"
               aria-label={stopSpeech ? `Stop speech for ${label}` : `Cancel ${label}`}
-              onClick={() => stopSpeech
-                ? onCancel(task.taskId, task.presentation?.ref) : onCancel(task.taskId)}
+              onClick={() =>
+                stopSpeech ? onCancel(task.taskId, task.presentation?.ref) : onCancel(task.taskId)
+              }
               disabled={pending}
             >
               <StopCircleIcon weight="bold" />
@@ -278,16 +282,26 @@ export function CallActivity({
   const [hiddenTerminalTasks, setHiddenTerminalTasks] = React.useState<Set<string>>(
     () => new Set()
   );
-  const latestPresentationTask = tasks.reduce<VoiceTaskView | null>((latest, task) =>
-    task.presentation && (!latest?.presentation ||
-      task.presentation.startedAtMs > latest.presentation.startedAtMs) ? task : latest, null);
-  const speakingTaskId = isAgentSpeaking && latestPresentationTask?.state === 'completed' &&
+  const latestPresentationTask = tasks.reduce<VoiceTaskView | null>(
+    (latest, task) =>
+      task.presentation &&
+      (!latest?.presentation || task.presentation.startedAtMs > latest.presentation.startedAtMs)
+        ? task
+        : latest,
+    null
+  );
+  const speakingTaskId =
+    isAgentSpeaking &&
+    latestPresentationTask?.state === 'completed' &&
     (latestPresentationTask.presentation?.state === 'speaking' ||
       latestPresentationTask.presentation?.state === 'stop_requested')
-      ? latestPresentationTask.taskId : null;
-  const stoppingTaskId = latestPresentationTask?.state === 'completed' &&
+      ? latestPresentationTask.taskId
+      : null;
+  const stoppingTaskId =
+    latestPresentationTask?.state === 'completed' &&
     latestPresentationTask.presentation?.state === 'stop_requested'
-      ? latestPresentationTask.taskId : null;
+      ? latestPresentationTask.taskId
+      : null;
   const visiblePresentationTaskId = speakingTaskId || stoppingTaskId;
   React.useEffect(() => {
     const timers = tasks
@@ -306,7 +320,9 @@ export function CallActivity({
       );
     return () => timers.forEach((timer) => window.clearTimeout(timer));
   }, [hiddenTerminalTasks, tasks, visiblePresentationTaskId]);
-  const visibleTasks = tasks.filter((task) => task.taskId === visiblePresentationTaskId || !hiddenTerminalTasks.has(task.taskId));
+  const visibleTasks = tasks.filter(
+    (task) => task.taskId === visiblePresentationTaskId || !hiddenTerminalTasks.has(task.taskId)
+  );
   const liveSummary = visibleTasks
     .map((task) => {
       const progress = task.progress

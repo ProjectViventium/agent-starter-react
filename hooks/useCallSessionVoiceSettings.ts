@@ -133,8 +133,7 @@ function normalizeAssistantRouteAssignment(value: unknown): AssistantRouteAssign
   const effort = typeof assignment.effort === 'string' ? assignment.effort.trim() : '';
   const providerLabel =
     typeof assignment.providerLabel === 'string' ? assignment.providerLabel.trim() : '';
-  const modelLabel =
-    typeof assignment.modelLabel === 'string' ? assignment.modelLabel.trim() : '';
+  const modelLabel = typeof assignment.modelLabel === 'string' ? assignment.modelLabel.trim() : '';
   return {
     provider,
     model,

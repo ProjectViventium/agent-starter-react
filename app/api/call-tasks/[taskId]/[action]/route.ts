@@ -30,8 +30,10 @@ export async function POST(
       { status: 401 }
     );
   }
-  const presentationRef = action === 'cancel' && body?.presentationRef !== undefined
-    ? parseCallIdentifier(body.presentationRef) : null;
+  const presentationRef =
+    action === 'cancel' && body?.presentationRef !== undefined
+      ? parseCallIdentifier(body.presentationRef)
+      : null;
   if (action === 'cancel' && body?.presentationRef !== undefined && !presentationRef) {
     return NextResponse.json(
       { code: 'unknown', message: 'The speech presentation is invalid.', retryable: false },

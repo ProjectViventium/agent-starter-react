@@ -229,21 +229,30 @@ describe('call task server proxy', () => {
   });
 });
 
-
 describe('exact completed speech Stop BFF carrier', () => {
   it('forwards bounded ref over the existing authenticated task action route', async () => {
     process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'https://librechat.example.com';
     process.env.VIVENTIUM_CALL_SESSION_SECRET = 'server-secret';
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({version: 1}), {status: 200}));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ version: 1 }), { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
-    const {POST} = await import('@/app/api/call-tasks/[taskId]/[action]/route');
-    const response = await POST(new Request('https://ui.example.com/api/call-tasks/task-1/cancel', {
-      method: 'POST', headers: {'Content-Type': 'application/json',
-        'X-VIVENTIUM-CALL-CAPABILITY': 'A'.repeat(43)},
-      body: JSON.stringify({callSessionId: 'call-1', presentationRef: 'speech-1'}),
-    }), {params: Promise.resolve({taskId: 'task-1', action: 'cancel'})});
+    const { POST } = await import('@/app/api/call-tasks/[taskId]/[action]/route');
+    const response = await POST(
+      new Request('https://ui.example.com/api/call-tasks/task-1/cancel', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-VIVENTIUM-CALL-CAPABILITY': 'A'.repeat(43),
+        },
+        body: JSON.stringify({ callSessionId: 'call-1', presentationRef: 'speech-1' }),
+      }),
+      { params: Promise.resolve({ taskId: 'task-1', action: 'cancel' }) }
+    );
     expect(response.status).toBe(200);
-    expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toEqual(
-      {callSessionId: 'call-1', presentationRef: 'speech-1'});
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toEqual({
+      callSessionId: 'call-1',
+      presentationRef: 'speech-1',
+    });
   });
 });

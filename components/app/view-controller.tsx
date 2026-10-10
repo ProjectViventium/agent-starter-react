@@ -99,8 +99,7 @@ export function ViewController({
     },
     [callSessionId]
   );
-  const linkedChatHref =
-    linkedChat?.callSessionId === callSessionId ? linkedChat.href : null;
+  const linkedChatHref = linkedChat?.callSessionId === callSessionId ? linkedChat.href : null;
   const showSessionView = isConnected || connectionState !== ConnectionState.Disconnected;
   const viewMotionProps = reducedMotion
     ? { initial: false as const, animate: 'visible', exit: 'visible', transition: { duration: 0 } }
