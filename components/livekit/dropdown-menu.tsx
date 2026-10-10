@@ -26,7 +26,7 @@ function DropdownMenuContent({
         data-slot="dropdown-menu-content"
         sideOffset={sideOffset}
         className={cn(
-          'bg-popover text-popover-foreground border-border/80 z-50 min-w-56 overflow-hidden rounded-[1.4rem] border p-1 shadow-[0_18px_48px_rgba(15,23,42,0.18)] outline-hidden',
+          'bg-popover text-popover-foreground border-border/80 z-[100] min-w-56 overflow-hidden rounded-[1.4rem] border p-1 shadow-[0_18px_48px_rgba(15,23,42,0.18)] outline-hidden',
           'data-[state=open]:animate-in data-[state=closed]:animate-out',
           'data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0',
           'data-[state=open]:zoom-in-95 data-[state=closed]:zoom-out-95',
@@ -114,7 +114,7 @@ function DropdownMenuSubContent({
         data-slot="dropdown-menu-sub-content"
         sideOffset={sideOffset}
         className={cn(
-          'bg-popover text-popover-foreground border-border/80 z-50 min-w-56 overflow-hidden rounded-[1.25rem] border p-1 shadow-[0_18px_48px_rgba(15,23,42,0.18)] outline-hidden',
+          'bg-popover text-popover-foreground border-border/80 z-[100] min-w-56 overflow-hidden rounded-[1.25rem] border p-1 shadow-[0_18px_48px_rgba(15,23,42,0.18)] outline-hidden',
           'data-[state=open]:animate-in data-[state=closed]:animate-out',
           'data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0',
           'data-[state=open]:zoom-in-95 data-[state=closed]:zoom-out-95',

@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
+import { proxyCallTaskRequest } from '@/app/api/call-tasks/proxy';
 import { useCallTaskActions } from '@/hooks/useCallTaskActions';
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  delete process.env.VIVENTIUM_LIBRECHAT_ORIGIN;
+  delete process.env.VIVENTIUM_CALL_SESSION_SECRET;
+});
 
 describe('useCallTaskActions', () => {
   it('calls the frozen cancel, retry, and input routes', async () => {
@@ -242,5 +247,202 @@ describe('useCallTaskActions', () => {
     });
 
     expect(received).toEqual([previousEvent, queued, running]);
+  });
+  it.each([
+    ['already_completed', 'completed'],
+    ['not_active', 'failed'],
+  ])(
+    'applies a BFF-bound %s event without confirming cancellation or leaving a call alarm',
+    async (outcome, state) => {
+      process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'https://librechat.example.com';
+      process.env.VIVENTIUM_CALL_SESSION_SECRET = 'server-secret';
+      const event = {
+        version: 1,
+        eventId: 'terminal-1',
+        sequence: 7,
+        emittedAt: '2026-10-05T12:00:00.000Z',
+        callSessionId: 'call-1',
+        taskId: 'task-1',
+        type: 'state',
+        state,
+        cancellable: false,
+        retryable: false,
+      };
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: RequestInfo | URL) => {
+          if (url instanceof URL)
+            return new Response(JSON.stringify({ version: 1, outcome, event }), { status: 409 });
+          return proxyCallTaskRequest(
+            '/api/viventium/voice/tasks/task-1/cancel',
+            'POST',
+            'call-1',
+            'A'.repeat(43),
+            { callSessionId: 'call-1' }
+          );
+        })
+      );
+      const onTaskEvent = vi.fn();
+      const { result } = renderHook(() => useCallTaskActions('call-1', onTaskEvent));
+      await act(async () => {
+        expect(await result.current.cancel('../unsafe')).toBe(false);
+      });
+      expect(result.current.actionError).not.toBeNull();
+      await act(async () => {
+        expect(await result.current.cancel('task-1')).toBe(false);
+      });
+      expect(onTaskEvent).toHaveBeenCalledExactlyOnceWith(event);
+      expect(result.current.actionError).toBeNull();
+      expect(result.current.actionRetryable).toBe(false);
+      expect(result.current.pendingTaskIds.size).toBe(0);
+    }
+  );
+  it.each([
+    { callSessionId: 'foreign-call' },
+    { taskId: 'foreign-task' },
+    { taskId: 'child-task', parentTaskId: 'task-1' },
+    { state: 'running' },
+    { cancellable: true },
+  ])('does not silently resolve an invalid terminal cancellation event %p', async (patch) => {
+    const event = {
+      version: 1,
+      eventId: 'invalid-1',
+      sequence: 1,
+      emittedAt: '2026-10-05T12:00:00.000Z',
+      callSessionId: 'call-1',
+      taskId: 'task-1',
+      type: 'state',
+      state: 'completed',
+      cancellable: false,
+      retryable: false,
+      ...patch,
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify({ outcome: 'already_completed', event }), { status: 409 })
+        )
+    );
+    const onTaskEvent = vi.fn();
+    const { result } = renderHook(() => useCallTaskActions('call-1', onTaskEvent));
+    await act(async () => {
+      expect(await result.current.cancel('task-1')).toBe(false);
+    });
+    expect(result.current.actionError).not.toBeNull();
+  });
+
+  it('logs only structured action stages and excludes identity, credentials and task input', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            event: {
+              version: 1,
+              eventId: 'event-1',
+              sequence: 1,
+              emittedAt: '2026-10-05T12:00:00.000Z',
+              callSessionId: 'call-1',
+              taskId: 'task-1',
+              type: 'state',
+              state: 'running',
+              cancellable: true,
+              retryable: false,
+            },
+          }),
+          { status: 200 }
+        )
+      )
+    );
+    const { result } = renderHook(() => useCallTaskActions('call-1'));
+    await act(async () => {
+      expect(await result.current.submitInput('task-1', 'private-user-input')).toBe(true);
+    });
+    const records = debug.mock.calls.filter((args) => args[0] === '[ViventiumCallTaskAction]');
+    expect(records).toHaveLength(3);
+    expect(records.every((args) => typeof args[1] === 'string')).toBe(true);
+    const traces = records.map((args) => JSON.parse(String(args[1])));
+    expect(traces[0]).toEqual({ stage: 'request', action: 'input' });
+    expect(traces[1]).toEqual({
+      stage: 'response',
+      action: 'input',
+      status: 200,
+      elapsedMs: expect.any(Number),
+    });
+    expect(traces[1].elapsedMs).toBeGreaterThanOrEqual(0);
+    expect(traces[2]).toEqual({
+      stage: 'validation',
+      action: 'input',
+      outcome: null,
+      boundEventCount: 1,
+      malformedEvent: false,
+    });
+    const serialized = JSON.stringify(records);
+    for (const privateValue of [
+      'call-1',
+      'task-1',
+      'private-user-input',
+      'server-secret',
+      'http',
+      'capability',
+    ]) {
+      expect(serialized).not.toContain(privateValue);
+    }
+  });
+  it('logs a classified fetch failure without exposing the raw error message', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockRejectedValue(new TypeError('private-error-and-credential'))
+    );
+    const { result } = renderHook(() => useCallTaskActions('call-1'));
+    await act(async () => {
+      expect(await result.current.cancel('task-1')).toBe(false);
+    });
+    const records = debug.mock.calls.filter((args) => args[0] === '[ViventiumCallTaskAction]');
+    expect(JSON.parse(String(records.at(-1)?.[1]))).toEqual({
+      stage: 'failure',
+      action: 'cancel',
+      failureClass: 'fetch',
+    });
+    expect(JSON.stringify(records)).not.toContain('private-error-and-credential');
+  });
+});
+
+describe('completed native speech Stop action', () => {
+  it('forwards exact ref and accepts completed-control event without fabricating cancellation', async () => {
+    const event = {
+      version: 1,
+      eventId: 'playout-stop',
+      sequence: 2,
+      emittedAt: '2026-08-10T02:00:00.000Z',
+      callSessionId: 'call-1',
+      taskId: 'task-1',
+      type: 'state',
+      state: 'completed',
+      cancellable: false,
+      retryable: false,
+      presentation: { ref: 'speech-1', state: 'stop_requested', startedAtMs: 1000 },
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ version: 1, outcome: 'playout_stop_requested', event }), {
+        status: 200,
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const onEvent = vi.fn();
+    const { result } = renderHook(() => useCallTaskActions('call-1', onEvent));
+    await act(async () => {
+      expect(await result.current.cancel('task-1', 'speech-1')).toBe(true);
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toEqual({
+      callSessionId: 'call-1',
+      presentationRef: 'speech-1',
+    });
+    expect(onEvent).toHaveBeenCalledWith(event);
+    expect(result.current.actionError).toBeNull();
   });
 });

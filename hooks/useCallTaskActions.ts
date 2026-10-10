@@ -13,12 +13,14 @@ type TaskActionPayload = {
   retryable: boolean;
   events: VoiceTaskEventV1[];
   malformedEvent: boolean;
+  terminalOutcome: 'already_completed' | 'not_active' | null;
 };
 
 async function readTaskActionPayload(
   response: Response,
   callSessionId: string,
-  taskId: string
+  taskId: string,
+  action: 'cancel' | 'retry' | 'input'
 ): Promise<TaskActionPayload> {
   const payload = (await response.json().catch(() => ({}))) as {
     message?: unknown;
@@ -27,6 +29,8 @@ async function readTaskActionPayload(
     event?: unknown;
     previousEvent?: unknown;
     events?: unknown;
+    outcome?: unknown;
+    version?: unknown;
   };
   const hasEvent = Object.prototype.hasOwnProperty.call(payload, 'event');
   const hasPreviousEvent = Object.prototype.hasOwnProperty.call(payload, 'previousEvent');
@@ -59,12 +63,22 @@ async function readTaskActionPayload(
     malformedEvent ||
     ((hasEvent || hasPreviousEvent || hasEvents) && parsedEvents.length === 0) ||
     (response.ok && parsedEvents.length === 0);
+  const terminalEvent = parsedEvents.find((event) => event.taskId === taskId && !event.cancellable);
+  const terminalOutcome =
+    action !== 'cancel' || response.status !== 409 || payload.version !== 1 || malformedEvent
+      ? null
+      : payload.outcome === 'already_completed' && terminalEvent?.state === 'completed'
+        ? 'already_completed'
+        : payload.outcome === 'not_active' && terminalEvent?.state === 'failed'
+          ? 'not_active'
+          : null;
   if (typeof payload.message === 'string' && payload.message.trim()) {
     return {
       message: payload.message.trim().slice(0, 2_000),
       retryable: payload.retryable === true,
       events: parsedEvents,
       malformedEvent,
+      terminalOutcome,
     };
   }
   if (typeof payload.error === 'string' && payload.error.trim()) {
@@ -73,6 +87,7 @@ async function readTaskActionPayload(
       retryable: payload.retryable === true,
       events: parsedEvents,
       malformedEvent,
+      terminalOutcome,
     };
   }
   return {
@@ -82,6 +97,7 @@ async function readTaskActionPayload(
     retryable: response.status >= 500,
     events: parsedEvents,
     malformedEvent,
+    terminalOutcome,
   };
 }
 
@@ -94,8 +110,18 @@ export function useCallTaskActions(
   const [pendingTaskIds, setPendingTaskIds] = useState<Set<string>>(() => new Set());
 
   const request = useCallback(
-    async (taskId: string, action: 'cancel' | 'retry' | 'input', input?: string) => {
-      if (!callSessionId || !SAFE_ID.test(callSessionId) || !SAFE_ID.test(taskId)) {
+    async (
+      taskId: string,
+      action: 'cancel' | 'retry' | 'input',
+      input?: string,
+      presentationRef?: string
+    ) => {
+      if (
+        !callSessionId ||
+        !SAFE_ID.test(callSessionId) ||
+        !SAFE_ID.test(taskId) ||
+        (presentationRef !== undefined && !SAFE_ID.test(presentationRef))
+      ) {
         setActionError('This task action is not available for the current call.');
         setActionRetryable(false);
         return false;
@@ -110,6 +136,8 @@ export function useCallTaskActions(
       setActionError(null);
       setActionRetryable(false);
       setPendingTaskIds((current) => new Set(current).add(taskId));
+      const requestStartedAt = performance.now();
+      console.debug('[ViventiumCallTaskAction]', JSON.stringify({ stage: 'request', action }));
       const controller = new AbortController();
       let timedOut = false;
       const timeoutId = window.setTimeout(() => {
@@ -126,15 +154,38 @@ export function useCallTaskActions(
           body: JSON.stringify({
             callSessionId,
             ...(action === 'input' ? { input: normalizedInput } : {}),
+            ...(action === 'cancel' && presentationRef ? { presentationRef } : {}),
           }),
           cache: 'no-store',
           signal: controller.signal,
         });
-        const payload = await readTaskActionPayload(response, callSessionId, taskId);
+        console.debug(
+          '[ViventiumCallTaskAction]',
+          JSON.stringify({
+            stage: 'response',
+            action,
+            status: response.status,
+            elapsedMs: Math.round(Math.max(0, performance.now() - requestStartedAt)),
+          })
+        );
+        const payload = await readTaskActionPayload(response, callSessionId, taskId, action);
+        console.debug(
+          '[ViventiumCallTaskAction]',
+          JSON.stringify({
+            stage: 'validation',
+            action,
+            outcome: payload.terminalOutcome,
+            boundEventCount: payload.events.length,
+            malformedEvent: payload.malformedEvent,
+          })
+        );
         payload.events.forEach((event) => onTaskEvent?.(event));
         if (payload.malformedEvent) {
           setActionError('The task runtime returned invalid task state. Live recovery will retry.');
           setActionRetryable(true);
+          return false;
+        }
+        if (payload.terminalOutcome) {
           return false;
         }
         if (!response.ok) {
@@ -147,6 +198,14 @@ export function useCallTaskActions(
         }
         return true;
       } catch (error) {
+        console.debug(
+          '[ViventiumCallTaskAction]',
+          JSON.stringify({
+            stage: 'failure',
+            action,
+            failureClass: timedOut ? 'timeout' : error instanceof TypeError ? 'fetch' : 'unknown',
+          })
+        );
         if (timedOut) {
           setActionError(
             'The task runtime did not respond in time. No action was confirmed; you can retry safely.'
@@ -179,7 +238,8 @@ export function useCallTaskActions(
       setActionError(null);
       setActionRetryable(false);
     },
-    cancel: (taskId: string) => request(taskId, 'cancel'),
+    cancel: (taskId: string, presentationRef?: string) =>
+      request(taskId, 'cancel', undefined, presentationRef),
     retry: (taskId: string) => request(taskId, 'retry'),
     submitInput: (taskId: string, input: string) => request(taskId, 'input', input),
   };

@@ -1,5 +1,5 @@
 import React from 'react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import type { AppConfig } from '@/app-config';
 import { SessionView } from '@/components/app/session-view';
@@ -7,12 +7,15 @@ import type { SpeakerSegmentV1, VoiceTaskView } from '@/lib/voice-events';
 
 const livekitState = vi.hoisted(() => ({
   agentState: 'listening',
+  agentAvailable: false,
+  microphoneIssue: null as string | null,
   latestSpeakerSegment: null as SpeakerSegmentV1 | null,
   tasks: [] as VoiceTaskView[],
 }));
 const useWingEngagementMock = vi.hoisted(() => vi.fn());
 const endCallMock = vi.hoisted(() => vi.fn());
 const stopRecoveryMock = vi.hoisted(() => vi.fn());
+const resultBridgeMock = vi.hoisted(() => vi.fn(() => vi.fn()));
 
 vi.mock('@livekit/components-react', () => ({
   useSessionContext: () => ({
@@ -27,11 +30,12 @@ vi.mock('@livekit/components-react', () => ({
       workerParticipant: null,
     },
   }),
-  useRemoteParticipants: () => [],
+  useRemoteParticipants: () => (livekitState.agentAvailable ? [{ isAgent: true }] : []),
 }));
 vi.mock('@/components/app/tile-layout', () => ({ TileLayout: () => null }));
-vi.mock('@/components/app/chat-transcript', () => ({ ChatTranscript: () => null }));
-vi.mock('@/components/app/preconnect-message', () => ({ PreConnectMessage: () => null }));
+vi.mock('@/components/app/chat-transcript', () => ({
+  ChatTranscript: () => null,
+}));
 vi.mock('@/components/livekit/scroll-area/scroll-area', () => {
   const ScrollArea = React.forwardRef<HTMLDivElement, React.ComponentProps<'div'>>(
     function MockScrollArea({ children, ...props }, ref) {
@@ -47,12 +51,15 @@ vi.mock('@/components/livekit/scroll-area/scroll-area', () => {
 vi.mock('@/components/livekit/agent-control-bar/agent-control-bar', () => ({
   AgentControlBar: ({
     controls,
+    callSessionId,
     onDisconnect,
   }: {
     controls: { chat: boolean };
+    callSessionId?: string | null;
     onDisconnect: () => void;
   }) => (
     <>
+      <output aria-label="Microphone call scope">{callSessionId}</output>
       <output aria-label="Chat control enabled">{String(controls.chat)}</output>
       <button type="button" onClick={onDisconnect}>
         Test end call
@@ -74,7 +81,9 @@ vi.mock('@/hooks/useViventiumVoiceEvents', () => ({
     stopRecovery: stopRecoveryMock,
   }),
 }));
-vi.mock('@/hooks/useWingEngagement', () => ({ useWingEngagement: useWingEngagementMock }));
+vi.mock('@/hooks/useWingEngagement', () => ({
+  useWingEngagement: useWingEngagementMock,
+}));
 vi.mock('@/hooks/useCallTaskActions', () => ({
   useCallTaskActions: () => ({
     cancel: vi.fn(),
@@ -84,10 +93,17 @@ vi.mock('@/hooks/useCallTaskActions', () => ({
     pendingTaskIds: new Set(),
   }),
 }));
-vi.mock('@/hooks/useCallResultBridge', () => ({ useCallResultBridge: () => vi.fn() }));
-vi.mock('@/hooks/useCallEndLifecycle', () => ({ useCallEndLifecycle: () => endCallMock }));
+vi.mock('@/hooks/useCallResultBridge', () => ({
+  useCallResultBridge: resultBridgeMock,
+}));
+vi.mock('@/hooks/useCallEndLifecycle', () => ({
+  useCallEndLifecycle: () => endCallMock,
+}));
 vi.mock('@/hooks/useMicrophoneHealth', () => ({
-  useMicrophoneHealth: () => ({ isInputBlocked: false }),
+  useMicrophoneHealth: () => ({
+    issue: livekitState.microphoneIssue,
+    isInputBlocked: Boolean(livekitState.microphoneIssue),
+  }),
 }));
 
 const appConfig = {
@@ -97,7 +113,16 @@ const appConfig = {
   isPreConnectBufferEnabled: false,
 } as AppConfig;
 
+const microphoneMessageAppConfig = { ...appConfig, isPreConnectBufferEnabled: true };
+
+beforeEach(() => {
+  vi.stubGlobal('React', React);
+});
+
 afterEach(() => {
+  vi.unstubAllGlobals();
+  livekitState.agentAvailable = false;
+  livekitState.microphoneIssue = null;
   livekitState.agentState = 'listening';
   livekitState.latestSpeakerSegment = null;
   livekitState.tasks = [];
@@ -107,13 +132,75 @@ afterEach(() => {
 });
 
 describe('SessionView call hardening', () => {
+  it.each(['call', 'wing', 'listen_only'] as const)(
+    'shows a muted microphone instead of listening copy when the agent is available in %s',
+    (mode) => {
+      livekitState.agentAvailable = true;
+      livekitState.microphoneIssue = 'Microphone is muted.';
+      render(
+        <SessionView
+          appConfig={microphoneMessageAppConfig}
+          callSessionId="call-muted"
+          mode={mode}
+        />
+      );
+      expect(screen.getByText('Microphone is muted.')).toBeInTheDocument();
+      expect(screen.queryByText('Agent is listening, ask it a question')).not.toBeInTheDocument();
+      expect(
+        screen.queryByText('Viventium is here with you, just listening.')
+      ).not.toBeInTheDocument();
+    }
+  );
+
+  it('preserves the classified microphone failure detail beside blocked-input wording', () => {
+    livekitState.agentAvailable = true;
+    livekitState.microphoneIssue = 'Microphone access is blocked for this site.';
+    render(
+      <SessionView
+        appConfig={microphoneMessageAppConfig}
+        callSessionId="call-mic-denied"
+        callIssue={{ kind: 'mic_denied', message: 'Microphone access is blocked for this site.' }}
+      />
+    );
+    expect(screen.getByText('Microphone access is blocked for this site.')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('Allow microphone access for this site');
+    expect(screen.queryByText('Agent is listening, ask it a question')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['call', true, 'Agent is listening, ask it a question'],
+    ['wing', true, 'Agent is listening, ask it a question'],
+    ['listen_only', true, 'Viventium is here with you, just listening.'],
+    ['call', false, 'Connecting Viventium to the room...'],
+  ] as const)(
+    'preserves healthy %s wording with agent availability %s',
+    (mode, available, message) => {
+      livekitState.agentAvailable = available;
+      render(
+        <SessionView
+          appConfig={microphoneMessageAppConfig}
+          callSessionId="call-healthy"
+          mode={mode}
+        />
+      );
+      expect(screen.getByText(message)).toBeInTheDocument();
+    }
+  );
+
+  it('scopes explicit microphone controls to the current call', () => {
+    render(<SessionView appConfig={appConfig} callSessionId="call-current" mode="call" />);
+    expect(screen.getByLabelText('Microphone call scope')).toHaveTextContent('call-current');
+  });
   it('renders a structured issue during an active call and suppresses new chat in Listen-Only', () => {
     const { container } = render(
       <SessionView
         appConfig={appConfig}
         callSessionId="call-1"
         mode="listen_only"
-        callIssue={{ kind: 'provider_failure', message: 'Configured provider failed.' }}
+        callIssue={{
+          kind: 'provider_failure',
+          message: 'Configured provider failed.',
+        }}
       />
     );
 
@@ -213,7 +300,9 @@ describe('SessionView call hardening', () => {
       );
 
       expect(
-        screen.getByRole('status', { name: `Call status: ${authoritativeStatus}` })
+        screen.getByRole('status', {
+          name: `Call status: ${authoritativeStatus}`,
+        })
       ).toBeInTheDocument();
     }
   );
@@ -288,5 +377,25 @@ describe('SessionView call hardening', () => {
     expect(stopRecoveryMock.mock.invocationCallOrder[0]).toBeLessThan(
       endCallMock.mock.invocationCallOrder[0]
     );
+  });
+});
+
+describe('linked chat owner wiring', () => {
+  it('passes the current call/result address consumer to the existing result bridge', () => {
+    const onLinkedChatHrefChange = vi.fn();
+    render(
+      <SessionView
+        appConfig={appConfig}
+        callSessionId="call-1"
+        conversationId="conversation-1"
+        onLinkedChatHrefChange={onLinkedChatHrefChange}
+      />
+    );
+    expect(resultBridgeMock).toHaveBeenLastCalledWith({
+      callSessionId: 'call-1',
+      conversationId: 'conversation-1',
+      tasks: [],
+      onLinkedChatHrefChange,
+    });
   });
 });

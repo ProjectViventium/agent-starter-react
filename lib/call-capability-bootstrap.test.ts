@@ -211,3 +211,34 @@ describe('pre-hydration call capability bootstrap', () => {
     expect(storage.get('viventium.call.capability.v1:call-lost-response')).toBe(browserCapability);
   });
 });
+
+describe('existing-chat navigation through capability bootstrap', () => {
+  it.each(['conversation-existing', 'new', '../foreign', 'x'.repeat(161)])(
+    'forwards only a concrete bounded chat identifier: %s',
+    (conversationId) => {
+      const replace = vi.fn();
+      const fakeWindow = {
+        location: {
+          search: `?callSessionId=call-current&autoConnect=0&conversationId=${encodeURIComponent(conversationId)}`,
+          hash: `#viventiumCallCapability=${'B'.repeat(43)}`,
+          pathname: '/playground/call-bootstrap',
+          replace,
+        },
+        history: { state: null, replaceState: vi.fn() },
+        sessionStorage: { setItem: vi.fn() },
+      };
+      new Function('window', 'document', CALL_CAPABILITY_BOOTSTRAP_SCRIPT)(fakeWindow, {
+        referrer: 'https://chat.example.test/c/conversation-existing',
+      });
+      const target = new URL(replace.mock.calls[0][0], 'https://voice.example.test');
+      expect(target.origin).toBe('https://voice.example.test');
+      expect(target.pathname).toBe('/playground/');
+      expect(target.searchParams.get('callSessionId')).toBe('call-current');
+      expect(target.searchParams.get('autoConnect')).toBe('0');
+      expect(target.searchParams.get('conversationId')).toBe(
+        conversationId === 'conversation-existing' ? conversationId : null
+      );
+      expect(target.hash).toBe('');
+    }
+  );
+});

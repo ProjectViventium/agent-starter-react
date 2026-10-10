@@ -80,6 +80,12 @@ export const SPEAKER_ACTOR_TRUST = [
 export type SpeakerSource = (typeof SPEAKER_SOURCES)[number];
 export type SpeakerActorTrust = (typeof SPEAKER_ACTOR_TRUST)[number];
 
+export type VoiceTaskPresentation = {
+  ref: string;
+  state: 'speaking' | 'stop_requested' | 'completed' | 'interrupted' | 'failed' | 'superseded';
+  startedAtMs: number;
+};
+
 export type VoiceTaskEventV1 = {
   version: 1;
   eventId: string;
@@ -108,6 +114,7 @@ export type VoiceTaskEventV1 = {
     choices?: { value: string; label: string }[];
   };
   resultMessageId?: string;
+  presentation?: VoiceTaskPresentation;
   owner?: { kind?: string; id?: string };
   error?: { code?: string; message?: string; retryable?: boolean };
 };
@@ -343,6 +350,22 @@ export function parseTaskEvent(input: string | unknown): VoiceTaskEventV1 | null
     }
   }
 
+  if (value.presentation !== undefined) {
+    const presentation = value.presentation;
+    if (
+      !isRecord(presentation) ||
+      Object.keys(presentation).length !== 3 ||
+      !isBoundedString(presentation.ref, 160) ||
+      typeof presentation.state !== 'string' ||
+      !['speaking', 'stop_requested', 'completed', 'interrupted', 'failed', 'superseded'].includes(
+        presentation.state
+      ) ||
+      !isNonNegativeInteger(presentation.startedAtMs) ||
+      presentation.startedAtMs === 0
+    ) {
+      return null;
+    }
+  }
   const source = normalizeSource(value.source);
   let snapshotSources: VoiceTaskSource[] | undefined;
   if (value.sources !== undefined) {
@@ -396,6 +419,7 @@ export function parseTaskEvent(input: string | unknown): VoiceTaskEventV1 | null
       ? { resultMessageId: value.resultMessageId }
       : {}),
     ...(owner ? { owner } : {}),
+    ...(value.presentation ? { presentation: value.presentation as VoiceTaskPresentation } : {}),
     ...(error ? { error } : {}),
   };
 }
@@ -461,8 +485,22 @@ export function applyTaskEvent(current: VoiceTaskView[], next: VoiceTaskEventV1)
       return current;
     }
   }
+  const sourceKey = (source: VoiceTaskSource) =>
+    source.id || source.url || `${source.provider ?? ''}\0${source.title ?? ''}`;
+  const sourceKeys = new Set<string>();
+  const sources: VoiceTaskSource[] = [];
+  for (const candidate of [
+    ...(existing?.sources ?? []),
+    ...(next.sources ?? []),
+    ...(next.source ? [next.source] : []),
+  ]) {
+    const key = sourceKey(candidate);
+    if (!sourceKeys.has(key)) {
+      sourceKeys.add(key);
+      sources.push(candidate);
+    }
+  }
   if (!existing) {
-    const sources = [...(next.sources ?? []), ...(next.source ? [next.source] : [])];
     return [
       ...current,
       {
@@ -471,14 +509,6 @@ export function applyTaskEvent(current: VoiceTaskView[], next: VoiceTaskEventV1)
         sources,
       },
     ];
-  }
-  const sourceKey = (source: VoiceTaskSource) =>
-    source.id || source.url || `${source.provider ?? ''}\0${source.title ?? ''}`;
-  const sources = [...existing.sources];
-  for (const candidate of [...(next.sources ?? []), ...(next.source ? [next.source] : [])]) {
-    if (!sources.some((source) => sourceKey(source) === sourceKey(candidate))) {
-      sources.push(candidate);
-    }
   }
   return current.map((event) =>
     event.taskId === next.taskId

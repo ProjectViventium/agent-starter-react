@@ -103,6 +103,79 @@ describe('useCallSessionVoiceSettings immutable route preflight', () => {
     expect(result.current.assistantRoute?.primary.effort).toBe('high');
     expect(result.current.assistantRoute?.voiceFallbackLlm?.effort).toBe('high');
   });
+  it('carries optional catalog labels without another fetch or changing route IDs', async () => {
+    const assignment = {
+      provider: 'glasshive-harness',
+      model: 'grok-build:grok-4.7-build-fast',
+      effort: 'high',
+      providerLabel: ' xPerfect ',
+      modelLabel: ' Grok / Grok 4.7 Fast ',
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          requestedVoiceRoute: {},
+          savedVoiceRoute: {},
+          selectionVoiceRoute: metadata,
+          assistantRoute: {
+            primary: assignment,
+            effective: assignment,
+            inheritsPrimary: true,
+          },
+        }),
+        { status: 200 }
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const { result } = renderHook(() => useCallSessionVoiceSettings('synthetic-call', metadata));
+    await waitFor(() =>
+      expect(result.current.assistantRoute?.effective.providerLabel).toBe('xPerfect')
+    );
+    expect(result.current.assistantRoute?.effective).toEqual({
+      ...assignment,
+      providerLabel: 'xPerfect',
+      modelLabel: 'Grok / Grok 4.7 Fast',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops invalid or blank labels and preserves unregistered routes', async () => {
+    const assignment = {
+      provider: 'unknown-provider',
+      model: 'unknown-model',
+      effort: 'high',
+      providerLabel: 18,
+      modelLabel: '  ',
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            requestedVoiceRoute: {},
+            savedVoiceRoute: {},
+            selectionVoiceRoute: metadata,
+            assistantRoute: {
+              primary: assignment,
+              effective: assignment,
+              inheritsPrimary: true,
+            },
+          }),
+          { status: 200 }
+        )
+      )
+    );
+    const { result } = renderHook(() => useCallSessionVoiceSettings('synthetic-call', metadata));
+    await waitFor(() =>
+      expect(result.current.assistantRoute?.effective.model).toBe('unknown-model')
+    );
+    expect(result.current.assistantRoute?.effective).toEqual({
+      provider: 'unknown-provider',
+      model: 'unknown-model',
+      effort: 'high',
+    });
+  });
+
   it('keeps the last saved choices when a save fails and can recover on retry', async () => {
     const saved = {
       stt: { provider: 'openai', variant: 'gpt-4o-transcribe' },

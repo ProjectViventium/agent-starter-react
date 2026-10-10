@@ -121,6 +121,51 @@ describe('ConnectedAdvancedVoiceSettings', () => {
     expect(screen.getByText(/grok-build:grok-4\.7-build-fast/)).toHaveTextContent('high');
     expect(screen.getByText(/claude-code:claude-opus-5-5/)).toHaveTextContent('high');
   });
+  it('renders the capability-owned provider and model labels without exposing raw route IDs', () => {
+    const primary = {
+      provider: 'glasshive-harness',
+      model: 'codex-cli:gpt-6.1-sol',
+      effort: 'high',
+      providerLabel: 'xPerfect',
+      modelLabel: 'OpenAI / GPT-6.1 Sol',
+    };
+    const voice = {
+      provider: 'glasshive-harness',
+      model: 'grok-build:grok-4.7-build-fast',
+      effort: 'high',
+      providerLabel: 'xPerfect',
+      modelLabel: 'Grok / Grok 4.7 Fast',
+    };
+    const fallback = {
+      provider: 'glasshive-harness',
+      model: 'claude-code:claude-opus-5-5',
+      effort: 'high',
+      providerLabel: 'xPerfect',
+      modelLabel: 'Anthropic / Opus 5.5',
+    };
+    render(
+      <ConnectedAdvancedVoiceSettings
+        appConfig={appConfig}
+        ended={false}
+        settings={{
+          ...settings,
+          assistantRoute: {
+            primary,
+            voiceCallLlm: voice,
+            fallbackLlm: fallback,
+            voiceFallbackLlm: fallback,
+            effective: voice,
+            inheritsPrimary: false,
+          },
+        }}
+      />
+    );
+    expect(screen.getByText(/Grok \/ Grok 4.7 Fast/)).toHaveTextContent('xPerfect');
+    expect(screen.getByText(/Anthropic \/ Opus 5.5/)).toHaveTextContent('high');
+    expect(screen.queryByText(/grok-build:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/claude-code:/)).not.toBeInTheDocument();
+  });
+
   it('stays visible and read-only during connected and ended call states', () => {
     const { rerender } = render(
       <ConnectedAdvancedVoiceSettings appConfig={appConfig} settings={settings} ended={false} />

@@ -10,6 +10,14 @@ const CALL_OPENER_ORIGIN_STORAGE_PREFIX = 'viventium.call.opener-origin.v1:';
 const SAFE_CALL_ID = /^[A-Za-z0-9._:-]{1,160}$/;
 const SAFE_CAPABILITY = /^[A-Za-z0-9_-]{43}$/;
 
+function browserSessionStorage(): Storage | null {
+  try {
+    return typeof window === 'undefined' ? null : window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
 export function callCapabilityStorageKey(callSessionId: string): string | null {
   return SAFE_CALL_ID.test(callSessionId)
     ? `${CALL_CAPABILITY_STORAGE_PREFIX}${callSessionId}`
@@ -26,7 +34,7 @@ export function captureCallBrowserCapability({
   search: string;
   hash: string;
   pathname: string;
-  storage: Pick<Storage, 'setItem'>;
+  storage?: Pick<Storage, 'setItem'> | null;
   replaceUrl: (url: string) => void;
 }): boolean {
   const callSessionId = new URLSearchParams(search).get('callSessionId')?.trim() || '';
@@ -42,45 +50,53 @@ export function captureCallBrowserCapability({
   if (!storageKey || !SAFE_CAPABILITY.test(capability)) {
     return false;
   }
-  storage.setItem(storageKey, capability);
-  return true;
+  const tabStorage = storage === undefined ? browserSessionStorage() : storage;
+  if (!tabStorage) return false;
+  try {
+    tabStorage.setItem(storageKey, capability);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function readCallBrowserCapability(
   callSessionId: string,
-  storage: Pick<Storage, 'getItem'> | null = typeof window === 'undefined'
-    ? null
-    : window.sessionStorage
+  storage: Pick<Storage, 'getItem'> | null = browserSessionStorage()
 ): string | null {
   const key = callCapabilityStorageKey(callSessionId);
   if (!key || !storage) return null;
-  const capability = storage.getItem(key);
-  return capability && SAFE_CAPABILITY.test(capability) ? capability : null;
+  try {
+    const capability = storage.getItem(key);
+    return capability && SAFE_CAPABILITY.test(capability) ? capability : null;
+  } catch {
+    return null;
+  }
 }
 
 export function clearCallBrowserCapability(
   callSessionId: string,
-  storage: Pick<Storage, 'removeItem'> | null = typeof window === 'undefined'
-    ? null
-    : window.sessionStorage
+  storage: Pick<Storage, 'removeItem'> | null = browserSessionStorage()
 ): void {
   const key = callCapabilityStorageKey(callSessionId);
   if (key && storage) {
-    storage.removeItem(key);
-    storage.removeItem(`${CALL_OPENER_ORIGIN_STORAGE_PREFIX}${callSessionId}`);
+    try {
+      storage.removeItem(key);
+      storage.removeItem(`${CALL_OPENER_ORIGIN_STORAGE_PREFIX}${callSessionId}`);
+    } catch {
+      // Call teardown still completes when the browser denies storage access.
+    }
   }
 }
 
 export function readCallOpenerOrigin(
   callSessionId: string,
-  storage: Pick<Storage, 'getItem'> | null = typeof window === 'undefined'
-    ? null
-    : window.sessionStorage
+  storage: Pick<Storage, 'getItem'> | null = browserSessionStorage()
 ): string | null {
   if (!SAFE_CALL_ID.test(callSessionId) || !storage) return null;
-  const value = storage.getItem(`${CALL_OPENER_ORIGIN_STORAGE_PREFIX}${callSessionId}`);
-  if (!value) return null;
   try {
+    const value = storage.getItem(`${CALL_OPENER_ORIGIN_STORAGE_PREFIX}${callSessionId}`);
+    if (!value) return null;
     const parsed = new URL(value);
     return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.origin === value
       ? value

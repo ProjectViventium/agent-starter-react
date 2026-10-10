@@ -97,4 +97,162 @@ describe('call task server proxy', () => {
       retryable: true,
     });
   });
+  const terminalEvent = (patch = {}) => ({
+    version: 1,
+    eventId: 'terminal-event',
+    sequence: 5,
+    emittedAt: '2026-10-05T12:00:00.000Z',
+    callSessionId: 'call-1',
+    taskId: 'task-1',
+    type: 'state',
+    state: 'completed',
+    cancellable: false,
+    retryable: false,
+    ...patch,
+  });
+  const upstream = (payload: unknown, status = 409) => {
+    process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'https://librechat.example.com';
+    process.env.VIVENTIUM_CALL_SESSION_SECRET = 'server-secret';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(payload), {
+          status,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+    );
+  };
+  it.each([
+    ['already_completed', 'completed', 'The task has already finished.'],
+    ['not_active', 'failed', 'The task is no longer active.'],
+  ])(
+    'keeps the bound %s cancellation race as 409 with canonical terminal state',
+    async (outcome, state, message) => {
+      const event = terminalEvent({ state });
+      upstream({
+        version: 1,
+        outcome,
+        event,
+        task: { privateCanary: 'omit-me' },
+        privateCanary: 'omit-me',
+      });
+      const response = await proxyCallTaskRequest(
+        '/api/viventium/voice/tasks/task-1/cancel',
+        'POST',
+        'call-1',
+        'A'.repeat(43),
+        { callSessionId: 'call-1' }
+      );
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        version: 1,
+        outcome,
+        event,
+        message,
+        retryable: false,
+      });
+      expect(response.headers.get('Cache-Control')).toBe('no-store');
+    }
+  );
+  it.each([
+    { event: terminalEvent({ callSessionId: 'foreign-call' }) },
+    { event: terminalEvent({ taskId: 'foreign-task' }) },
+    { event: terminalEvent({ taskId: 'child-task', parentTaskId: 'task-1' }) },
+    { event: terminalEvent({ version: 2 }) },
+    { event: terminalEvent({ state: 'running' }) },
+    { event: terminalEvent({ cancellable: true }) },
+    { event: null },
+    { version: 2 },
+    { outcome: 'not_active' },
+    { outcome: 'cancelled_confirmed' },
+  ])('fails closed on an unbound or invalid terminal conflict %p', async (patch) => {
+    upstream({ version: 1, outcome: 'already_completed', event: terminalEvent(), ...patch });
+    const response = await proxyCallTaskRequest(
+      '/api/viventium/voice/tasks/task-1/cancel',
+      'POST',
+      'call-1',
+      'A'.repeat(43),
+      { callSessionId: 'call-1' }
+    );
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      code: 'unknown',
+      message: 'The call request failed.',
+      retryable: false,
+    });
+  });
+  it.each([401, 503])(
+    'retains error sanitization for HTTP%s despite a terminal-looking payload',
+    async (status) => {
+      upstream(
+        {
+          version: 1,
+          outcome: 'already_completed',
+          event: terminalEvent(),
+          task: { privateCanary: 'omit-me' },
+        },
+        status
+      );
+      const response = await proxyCallTaskRequest(
+        '/api/viventium/voice/tasks/task-1/cancel',
+        'POST',
+        'call-1',
+        'A'.repeat(43),
+        { callSessionId: 'call-1' }
+      );
+      expect(response.status).toBe(status);
+      expect(await response.json()).toEqual({
+        code: status === 401 ? 'auth_expired' : 'gateway_down',
+        message: 'The call request failed.',
+        retryable: false,
+      });
+    }
+  );
+  it.each([
+    ['/api/viventium/voice/tasks/task-1/retry', 'POST'],
+    ['/api/viventium/voice/tasks/task-1/input', 'POST'],
+    ['/api/viventium/voice/tasks/task-1/cancel', 'GET'],
+    ['/api/viventium/voice/tasks/../task-1/cancel', 'POST'],
+    ['/api/viventium/voice/tasks/task-1%2Fother/cancel', 'POST'],
+  ] as const)('does not reinterpret another request path or method %s', async (path, method) => {
+    upstream({ version: 1, outcome: 'already_completed', event: terminalEvent() });
+    const response = await proxyCallTaskRequest(path, method, 'call-1', 'A'.repeat(43), {
+      callSessionId: 'call-1',
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      code: 'unknown',
+      message: 'The call request failed.',
+      retryable: false,
+    });
+  });
+});
+
+describe('exact completed speech Stop BFF carrier', () => {
+  it('forwards bounded ref over the existing authenticated task action route', async () => {
+    process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'https://librechat.example.com';
+    process.env.VIVENTIUM_CALL_SESSION_SECRET = 'server-secret';
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ version: 1 }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { POST } = await import('@/app/api/call-tasks/[taskId]/[action]/route');
+    const response = await POST(
+      new Request('https://ui.example.com/api/call-tasks/task-1/cancel', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-VIVENTIUM-CALL-CAPABILITY': 'A'.repeat(43),
+        },
+        body: JSON.stringify({ callSessionId: 'call-1', presentationRef: 'speech-1' }),
+      }),
+      { params: Promise.resolve({ taskId: 'task-1', action: 'cancel' }) }
+    );
+    expect(response.status).toBe(200);
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toEqual({
+      callSessionId: 'call-1',
+      presentationRef: 'speech-1',
+    });
+  });
 });

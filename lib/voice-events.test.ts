@@ -162,6 +162,94 @@ describe('monotonic voice event stores', () => {
     expect(views[0]?.state).toBe('completed');
   });
 
+  it('hydrates the current Cortex source only once from authoritative source history', () => {
+    const source = { id: 'cortex-child-a', title: 'Background follow-up' };
+    const snapshot = parseTaskEvent(task({ type: 'snapshot', source, sources: [source] }))!;
+    const store = createBoundedVoiceEventStore();
+    applyTaskEventToStore(store, snapshot);
+    expect(store.taskViews[0]?.source).toEqual(source);
+    expect(store.taskViews[0]?.sources).toEqual([source]);
+  });
+
+  it('keeps distinct Cortex child identities in order even when their source labels match', () => {
+    const first = {
+      id: 'cortex-child-a',
+      title: 'Background follow-up',
+      url: 'https://example.com/shared',
+    };
+    const second = { ...first, id: 'cortex-child-b' };
+    const views = applyTaskEvent(
+      [],
+      task({ type: 'snapshot', source: second, sources: [first, second] })
+    );
+    expect(views[0]?.sources).toEqual([first, second]);
+    expect(views[0]?.source).toEqual(second);
+  });
+
+  it('preserves the Main result and interrupted child presentation through snapshot replay', () => {
+    const source = { id: 'cortex-child-a' };
+    const presentation = { ref: source.id, state: 'interrupted' as const, startedAtMs: 1234 };
+    const snapshot = task({
+      type: 'snapshot',
+      state: 'completed',
+      phase: 'follow_up',
+      source,
+      sources: [source],
+      resultMessageId: 'main-result',
+      turnId: 'main-turn',
+      streamId: 'main-turn',
+      owner: { kind: 'remote_generation', id: 'main-turn' },
+      presentation,
+    });
+    let views = applyTaskEvent([], snapshot);
+    views = applyTaskEvent(views, { ...snapshot, eventId: 'replayed-snapshot' });
+    views = applyTaskEvent(
+      views,
+      task({ eventId: 'presentation-2', sequence: 2, state: 'completed' })
+    );
+    expect(views[0]).toMatchObject({
+      state: 'completed',
+      resultMessageId: 'main-result',
+      turnId: 'main-turn',
+      streamId: 'main-turn',
+      owner: snapshot.owner,
+      presentation,
+    });
+    expect(views[0]?.sources).toEqual([source]);
+    expect(views[0]?.firstEmittedAt).toBe(snapshot.emittedAt);
+  });
+
+  it('normalizes an existing repeated source by identity without replacing its provenance', () => {
+    const first = { id: 'cortex-child-a', title: 'Original source' };
+    const revised = { id: first.id, title: 'Repeated metadata' };
+    const initial = applyTaskEvent([], task({ source: first }));
+    initial[0] = { ...initial[0], sources: [first, revised] };
+    const next = applyTaskEvent(
+      initial,
+      task({ eventId: 'source-2', sequence: 2, source: revised })
+    );
+    expect(next[0]?.sources).toEqual([first]);
+    expect(next[0]?.source).toEqual(revised);
+  });
+
+  it('uses the existing URL and provider-title identities when a source has no ID', () => {
+    const url = { url: 'https://example.com/source', title: 'Original source' };
+    const anonymous = { provider: 'Synthetic provider', title: 'Anonymous source' };
+    const initial = applyTaskEvent(
+      [],
+      task({
+        type: 'snapshot',
+        sources: [url, anonymous],
+        source: { ...url, title: 'Current source' },
+      })
+    );
+    const next = applyTaskEvent(
+      initial,
+      task({ eventId: 'source-2', sequence: 2, source: { ...anonymous } })
+    );
+    expect(next[0]?.sources).toEqual([url, anonymous]);
+  });
+
   it('clears stale progress detail when the task moves to native input', () => {
     let views = applyTaskEvent([], task({ phase: 'cortex', detail: 'error' }));
     views = applyTaskEvent(
@@ -416,5 +504,42 @@ describe('monotonic voice event stores', () => {
       revision: 7,
       text: 'Latest deterministic revision',
     });
+  });
+});
+
+describe('native active speech presentation', () => {
+  it('retains exact speech identity on completed task and terminal replay snapshots', () => {
+    const event = task({
+      state: 'completed',
+      cancellable: false,
+      resultMessageId: 'result-1',
+      presentation: { ref: 'speech-1', state: 'speaking', startedAtMs: 1000 },
+    });
+    expect(parseTaskEvent(event)).toEqual(event);
+    const initial = applyTaskEvent([], event);
+    const stopped = task({
+      ...event,
+      type: 'snapshot',
+      eventId: 'event-2',
+      sequence: 2,
+      presentation: { ref: 'speech-1', state: 'interrupted', startedAtMs: 1000 },
+    });
+    expect(applyTaskEvent(initial, stopped)[0]).toMatchObject({
+      state: 'completed',
+      resultMessageId: 'result-1',
+      presentation: { ref: 'speech-1', state: 'interrupted' },
+    });
+    expect(applyTaskEvent(applyTaskEvent(initial, stopped), event)[0].presentation?.state).toBe(
+      'interrupted'
+    );
+  });
+  it.each([
+    { ref: '', state: 'speaking', startedAtMs: 1000 },
+    { ref: 'speech-1', state: 'other', startedAtMs: 1000 },
+    { ref: 'speech-1', state: 'speaking', startedAtMs: true },
+    { ref: 'speech-1', state: 'speaking', startedAtMs: 0 },
+    { ref: 'speech-1', state: 'speaking', startedAtMs: 1000, extra: 'untrusted' },
+  ])('rejects malformed presentation %j', (presentation) => {
+    expect(parseTaskEvent({ ...task(), presentation })).toBeNull();
   });
 });

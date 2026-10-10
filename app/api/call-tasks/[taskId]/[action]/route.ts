@@ -30,6 +30,16 @@ export async function POST(
       { status: 401 }
     );
   }
+  const presentationRef =
+    action === 'cancel' && body?.presentationRef !== undefined
+      ? parseCallIdentifier(body.presentationRef)
+      : null;
+  if (action === 'cancel' && body?.presentationRef !== undefined && !presentationRef) {
+    return NextResponse.json(
+      { code: 'unknown', message: 'The speech presentation is invalid.', retryable: false },
+      { status: 400 }
+    );
+  }
   const input = action === 'input' ? parseTaskInput(body?.input) : null;
   if (action === 'input' && !input) {
     return NextResponse.json(
@@ -42,6 +52,6 @@ export async function POST(
     'POST',
     callSessionId,
     browserCapability,
-    { callSessionId, ...(input ? { input } : {}) }
+    { callSessionId, ...(input ? { input } : {}), ...(presentationRef ? { presentationRef } : {}) }
   );
 }

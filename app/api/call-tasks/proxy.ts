@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { CALL_CAPABILITY_HEADER } from '@/lib/call-browser-capability';
-import { normalizeProxyFailure } from '@/lib/call-proxy';
+import { normalizeProxyFailure, parseCallIdentifier } from '@/lib/call-proxy';
+import { parseTaskEvent } from '@/lib/voice-events';
 
 function config() {
   const origin = process.env.VIVENTIUM_LIBRECHAT_ORIGIN;
@@ -14,6 +15,63 @@ function config() {
       ? configuredTimeout
       : 4_500;
   return { origin, secret, timeoutMs };
+}
+
+function parseCancellationConflict(
+  payload: unknown,
+  target: URL,
+  method: 'GET' | 'POST',
+  callSessionId: string
+) {
+  const prefix = '/api/viventium/voice/tasks/';
+  const suffix = '/cancel';
+  if (
+    method !== 'POST' ||
+    !target.pathname.startsWith(prefix) ||
+    !target.pathname.endsWith(suffix) ||
+    !payload ||
+    typeof payload !== 'object' ||
+    Array.isArray(payload)
+  ) {
+    return null;
+  }
+  let taskId: string | null;
+  try {
+    taskId = parseCallIdentifier(
+      decodeURIComponent(target.pathname.slice(prefix.length, -suffix.length))
+    );
+  } catch {
+    return null;
+  }
+  const value = payload as { version?: unknown; outcome?: unknown; event?: unknown };
+  const event = parseTaskEvent(value.event);
+  const outcome =
+    value.outcome === 'already_completed' && event?.state === 'completed'
+      ? 'already_completed'
+      : value.outcome === 'not_active' && event?.state === 'failed'
+        ? 'not_active'
+        : null;
+  if (
+    value.version !== 1 ||
+    !outcome ||
+    !taskId ||
+    !event ||
+    event.callSessionId !== callSessionId ||
+    event.taskId !== taskId ||
+    event.cancellable
+  ) {
+    return null;
+  }
+  return {
+    version: 1,
+    outcome,
+    event,
+    message:
+      outcome === 'already_completed'
+        ? 'The task has already finished.'
+        : 'The task is no longer active.',
+    retryable: false,
+  };
 }
 
 export async function proxyCallTaskRequest(
@@ -93,6 +151,16 @@ export async function proxyCallTaskRequest(
 
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
+    const conflict =
+      response.status === 409
+        ? parseCancellationConflict(payload, target, method, callSessionId)
+        : null;
+    if (conflict) {
+      return NextResponse.json(conflict, {
+        status: response.status,
+        headers: { 'Cache-Control': 'no-store' },
+      });
+    }
     return NextResponse.json(normalizeProxyFailure(response.status, payload), {
       status: response.status,
     });

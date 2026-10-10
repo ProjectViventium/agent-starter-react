@@ -4,6 +4,8 @@ import {
   callBrowserCapabilityHeaders,
   captureCallBrowserCapability,
   clearCallBrowserCapability,
+  readCallBrowserCapability,
+  readCallOpenerOrigin,
 } from '@/lib/call-browser-capability';
 import {
   CallRequestError,
@@ -127,5 +129,82 @@ describe('classifyCallIssue', () => {
       message: 'Microphone startup timed out.',
       retryable: true,
     });
+  });
+});
+
+describe('unavailable per-call browser storage', () => {
+  const withBlockedStorage = (run: () => void) => {
+    const descriptor = Object.getOwnPropertyDescriptor(window, 'sessionStorage');
+    Object.defineProperty(window, 'sessionStorage', {
+      configurable: true,
+      get: () => {
+        throw new DOMException('Storage blocked', 'SecurityError');
+      },
+    });
+    try {
+      run();
+    } finally {
+      if (descriptor) Object.defineProperty(window, 'sessionStorage', descriptor);
+    }
+  };
+  it('returns no capability when browser storage acquisition is denied', () => {
+    withBlockedStorage(() => expect(readCallBrowserCapability('call-1')).toBeNull());
+  });
+  it('returns no opener when browser storage acquisition is denied', () => {
+    withBlockedStorage(() => expect(readCallOpenerOrigin('call-1')).toBeNull());
+  });
+  it('lets call teardown finish when browser storage acquisition is denied', () => {
+    withBlockedStorage(() => expect(() => clearCallBrowserCapability('call-1')).not.toThrow());
+  });
+  it('sends no capability header when browser storage acquisition is denied', () => {
+    withBlockedStorage(() => expect(callBrowserCapabilityHeaders('call-1')).toEqual({}));
+  });
+  it('strips the fragment without granting authority when capture storage is blocked', () => {
+    withBlockedStorage(() => {
+      const replaceUrl = vi.fn();
+      expect(
+        captureCallBrowserCapability({
+          search: '?callSessionId=call-1',
+          hash: `#viventiumCallCapability=${'A'.repeat(43)}`,
+          pathname: '/',
+          replaceUrl,
+        })
+      ).toBe(false);
+      expect(replaceUrl).toHaveBeenCalledWith('/?callSessionId=call-1');
+    });
+  });
+  it('returns no authority when storage reads fail', () => {
+    const storage = {
+      getItem: () => {
+        throw new DOMException('Read denied', 'SecurityError');
+      },
+    };
+    expect(readCallBrowserCapability('call-1', storage)).toBeNull();
+    expect(readCallOpenerOrigin('call-1', storage)).toBeNull();
+  });
+  it('lets teardown finish when removal fails', () => {
+    const storage = {
+      removeItem: () => {
+        throw new DOMException('Removal denied', 'SecurityError');
+      },
+    };
+    expect(() => clearCallBrowserCapability('call-1', storage)).not.toThrow();
+  });
+  it('strips a fragment before refusing capture when storage writes fail', () => {
+    const replaceUrl = vi.fn();
+    expect(
+      captureCallBrowserCapability({
+        search: '?callSessionId=call-1',
+        hash: `#viventiumCallCapability=${'A'.repeat(43)}`,
+        pathname: '/',
+        storage: {
+          setItem: () => {
+            throw new DOMException('Write denied', 'SecurityError');
+          },
+        },
+        replaceUrl,
+      })
+    ).toBe(false);
+    expect(replaceUrl).toHaveBeenCalledWith('/?callSessionId=call-1');
   });
 });
