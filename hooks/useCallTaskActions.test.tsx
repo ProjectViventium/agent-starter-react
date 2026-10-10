@@ -427,13 +427,11 @@ describe('completed native speech Stop action', () => {
       retryable: false,
       presentation: { ref: 'speech-1', state: 'stop_requested', startedAtMs: 1000 },
     };
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(
-        new Response(JSON.stringify({ version: 1, outcome: 'playout_stop_requested', event }), {
-          status: 200,
-        })
-      );
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ version: 1, outcome: 'playout_stop_requested', event }), {
+        status: 200,
+      })
+    );
     vi.stubGlobal('fetch', fetchMock);
     const onEvent = vi.fn();
     const { result } = renderHook(() => useCallTaskActions('call-1', onEvent));
