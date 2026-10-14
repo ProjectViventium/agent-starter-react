@@ -133,3 +133,17 @@ be regression tested without adding code to the production bundle.
 ## Contributing
 
 This template is open source and we welcome contributions! Please open a PR or issue through GitHub, and don't forget to join us in the [LiveKit Community Slack](https://livekit.io/join-slack)!
+
+## Viventium clarification delivery
+
+The voice interface presents questions owned by the existing worker harness. It is a courier,
+not a second agent manager. Native question forms preserve exact question keys, selected values,
+free-text notes, and the request fingerprint. A new request clears old selections; a refreshed
+snapshot of the same request keeps them. Native permission requests keep the action details
+available without reading internal status text as a conversational reply.
+
+Do not replace this contract with prompt keywords, generic status messages, automatic approvals,
+or a separate voice-only orchestration framework. Text, Telegram, and voice use the same worker
+request ownership. The focused cases in `lib/voice-events.test.ts` and
+`components/app/call-activity.test.tsx` retain the parser and presentation boundaries. Passing
+these cases alone does not prove always-on voice reliability or a response latency target.

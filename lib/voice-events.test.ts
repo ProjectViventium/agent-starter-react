@@ -543,3 +543,74 @@ describe('native active speech presentation', () => {
     expect(parseTaskEvent({ ...task(), presentation })).toBeNull();
   });
 });
+
+it('retains bounded native clarification form through task event and rejects duplicate native wire keys', () => {
+  const question = {
+    key: 'Which  size?',
+    label: 'Which size?',
+    multiSelect: true,
+    options: [
+      { value: 'Small', label: 'Small' },
+      { value: 'Other', label: 'Other' },
+    ],
+  };
+  const value = task({
+    state: 'needs_input',
+    type: 'needs_input',
+    needsInput: {
+      prompt: 'Choose size.',
+      inputType: 'native_question',
+      questionForm: { questions: [question] },
+    },
+  });
+  expect(parseTaskEvent(JSON.stringify(value))?.needsInput?.questionForm?.questions[0].key).toBe(
+    'Which  size?'
+  );
+  expect(
+    parseTaskEvent(
+      JSON.stringify({
+        ...value,
+        needsInput: { ...value.needsInput, questionForm: { questions: [question, question] } },
+      })
+    )
+  ).toBeNull();
+});
+
+describe('native permission operation detail', () => {
+  const needsInput = {
+    prompt: 'May I create the file? Allow once or Deny.',
+    inputType: 'choice' as const,
+    choices: [{ value: 'allow', label: 'Allow once' }],
+    nativeInputRequest: {
+      version: 1 as const,
+      kind: 'permission' as const,
+      requestId: 'permission-detail',
+      requestFingerprint: 'a'.repeat(64),
+      runId: 'run-detail',
+      attemptId: 'attempt-detail',
+      expiresAt: '2099-01-01T00:00:00.000Z',
+    },
+    operationTitle: 'Create synthetic.txt in the working folder.',
+  };
+  it('retains current native detail across a reconnect snapshot without changing the speech prompt', () => {
+    const event = parseTaskEvent(task({ type: 'snapshot', state: 'needs_input', needsInput }));
+    expect(event?.needsInput).toEqual(needsInput);
+    expect(applyTaskEvent([], event!)[0].needsInput).toEqual(needsInput);
+  });
+  it.each([
+    ['oversized', { operationTitle: 'x'.repeat(8001) }],
+    ['wrong type', { operationTitle: 42 }],
+    ['no binding', { nativeInputRequest: undefined }],
+    [
+      'question binding',
+      { nativeInputRequest: { ...needsInput.nativeInputRequest, kind: 'question' } },
+    ],
+  ])('rejects %s native detail', (_label, change) => {
+    expect(
+      parseTaskEvent({
+        ...task({ type: 'needs_input', state: 'needs_input' }),
+        needsInput: { ...needsInput, ...change },
+      })
+    ).toBeNull();
+  });
+});

@@ -110,13 +110,33 @@ export type VoiceTaskEventV1 = {
   sources?: VoiceTaskSource[];
   needsInput?: {
     prompt: string;
-    inputType: 'text' | 'choice' | 'confirm';
+    operationTitle?: string;
+    inputType: 'text' | 'choice' | 'confirm' | 'native_question';
+    questionForm?: NativeQuestionForm;
+    nativeInputRequest?: {
+      version: 1;
+      kind: 'question' | 'permission';
+      requestId: string;
+      requestFingerprint: string;
+      runId: string;
+      attemptId: string;
+      expiresAt: string;
+    };
     choices?: { value: string; label: string }[];
   };
   resultMessageId?: string;
   presentation?: VoiceTaskPresentation;
   owner?: { kind?: string; id?: string };
   error?: { code?: string; message?: string; retryable?: boolean };
+};
+
+export type NativeQuestionForm = {
+  questions: Array<{
+    key: string;
+    label: string;
+    multiSelect: boolean;
+    options: Array<{ value: string; label: string }>;
+  }>;
 };
 
 export type VoiceTaskView = VoiceTaskEventV1 & {
@@ -262,7 +282,10 @@ function normalizeNeedsInput(value: unknown): VoiceTaskEventV1['needsInput'] | u
   if (
     !isRecord(value) ||
     !isBoundedString(value.prompt, 8_000) ||
-    (value.inputType !== 'text' && value.inputType !== 'choice' && value.inputType !== 'confirm')
+    (value.inputType !== 'text' &&
+      value.inputType !== 'choice' &&
+      value.inputType !== 'confirm' &&
+      value.inputType !== 'native_question')
   ) {
     return null;
   }
@@ -280,7 +303,74 @@ function normalizeNeedsInput(value: unknown): VoiceTaskEventV1['needsInput'] | u
   )
     return null;
   const choices = value.choices as { value: string; label: string }[] | undefined;
-  return { prompt: value.prompt, inputType: value.inputType, ...(choices ? { choices } : {}) };
+  let nativeInputRequest: NonNullable<VoiceTaskEventV1['needsInput']>['nativeInputRequest'];
+  if (value.nativeInputRequest !== undefined) {
+    const request = value.nativeInputRequest;
+    if (
+      !isRecord(request) ||
+      request.version !== 1 ||
+      !['question', 'permission'].includes(String(request.kind)) ||
+      !isBoundedString(request.requestId, 512) ||
+      !isBoundedString(request.requestFingerprint, 64) ||
+      !/^[a-f0-9]{64}$/.test(String(request.requestFingerprint)) ||
+      !isBoundedString(request.runId, 160) ||
+      !isBoundedString(request.attemptId, 160) ||
+      !isBoundedString(request.expiresAt, 80) ||
+      !Number.isFinite(Date.parse(String(request.expiresAt)))
+    )
+      return null;
+    nativeInputRequest = request as typeof nativeInputRequest;
+  }
+  if (
+    value.operationTitle !== undefined &&
+    (!isBoundedString(value.operationTitle, 8_000) ||
+      value.inputType !== 'choice' ||
+      nativeInputRequest?.kind !== 'permission')
+  )
+    return null;
+  const operationTitle = value.operationTitle as string | undefined;
+  let questionForm: NativeQuestionForm | undefined;
+  if (value.inputType === 'native_question') {
+    const form = value.questionForm;
+    if (
+      !isRecord(form) ||
+      !Array.isArray(form.questions) ||
+      form.questions.length < 1 ||
+      form.questions.length > 16 ||
+      form.questions.some(
+        (q) =>
+          !isRecord(q) ||
+          !isBoundedString(q.key, 8000) ||
+          !isBoundedString(q.label, 8000) ||
+          typeof q.multiSelect !== 'boolean' ||
+          !Array.isArray(q.options) ||
+          q.options.length < 1 ||
+          q.options.length > 17 ||
+          q.options.some(
+            (o) => !isRecord(o) || !isBoundedString(o.value, 160) || !isBoundedString(o.label, 160)
+          )
+      )
+    )
+      return null;
+    questionForm = form as NativeQuestionForm;
+    if (
+      new Set(questionForm.questions.map((q) => q.key)).size !== questionForm.questions.length ||
+      questionForm.questions.some(
+        (q) =>
+          new Set(q.options.map((o) => o.value)).size !== q.options.length ||
+          !q.options.some((o) => o.value === 'Other')
+      )
+    )
+      return null;
+  }
+  return {
+    prompt: value.prompt,
+    ...(operationTitle !== undefined ? { operationTitle } : {}),
+    inputType: value.inputType,
+    ...(choices ? { choices } : {}),
+    ...(questionForm ? { questionForm } : {}),
+    ...(nativeInputRequest ? { nativeInputRequest } : {}),
+  };
 }
 
 function normalizeError(value: unknown): VoiceTaskEventV1['error'] | undefined | null {

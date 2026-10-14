@@ -819,3 +819,244 @@ it('allows an exact idempotent speech Stop retry after the request ends while na
   rerender(<CallActivity isAgentSpeaking={false} tasks={[completed]} onCancel={onCancel} />);
   expect(screen.queryByRole('button', { name: /^Stop speech/ })).not.toBeInTheDocument();
 });
+
+describe('Native clarification form', () => {
+  it('submits exact native question choices and Other notes without exposing JSON', () => {
+    const onInput = vi.fn();
+    const key = 'Which  size?';
+    const event = parseTaskEvent(
+      JSON.stringify(
+        task({
+          state: 'needs_input',
+          type: 'needs_input',
+          needsInput: {
+            prompt: 'Choose the size.',
+            inputType: 'native_question',
+            questionForm: {
+              questions: [
+                {
+                  key,
+                  label: 'Which size?',
+                  multiSelect: false,
+                  options: [
+                    { value: 'Small', label: 'Small' },
+                    { value: 'Other', label: 'Other' },
+                  ],
+                },
+              ],
+            },
+          },
+        })
+      )
+    )!;
+    render(<CallActivity tasks={applyTaskEvent([], event)} onInput={onInput} />);
+    fireEvent.click(screen.getByLabelText('Other'));
+    fireEvent.change(screen.getByLabelText('Your answer: Which size?'), {
+      target: { value: 'Custom  exact size' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(onInput).toHaveBeenCalledWith(
+      'task-1',
+      JSON.stringify({
+        answers: { [key]: ['Other'] },
+        annotations: { [key]: { notes: 'Custom  exact size' } },
+      })
+    );
+    expect(screen.queryByText('answers')).not.toBeInTheDocument();
+  });
+});
+
+it('resets answers only when native question form changes on the same task', () => {
+  const onInput = vi.fn();
+  const form = (key: string) => ({
+    questions: [
+      {
+        key,
+        label: key,
+        multiSelect: false,
+        options: [
+          { value: 'Small', label: 'Small' },
+          { value: 'Other', label: 'Other' },
+        ],
+      },
+    ],
+  });
+  const first = view({
+    state: 'needs_input',
+    type: 'needs_input',
+    needsInput: {
+      prompt: 'Choose.',
+      inputType: 'native_question',
+      questionForm: form('First question?'),
+    },
+  });
+  const second = view({
+    ...first,
+    sequence: 2,
+    needsInput: {
+      prompt: 'Choose.',
+      inputType: 'native_question',
+      questionForm: form('Second question?'),
+    },
+  });
+  const { rerender } = render(<CallActivity tasks={[first]} onInput={onInput} />);
+  fireEvent.click(screen.getByLabelText('Small'));
+  rerender(<CallActivity tasks={[{ ...first, sequence: 2 }]} onInput={onInput} />);
+  expect(screen.getByLabelText('Small')).toBeChecked();
+  rerender(<CallActivity tasks={[second]} onInput={onInput} />);
+  expect(screen.getByLabelText('Small')).not.toBeChecked();
+  fireEvent.click(screen.getByLabelText('Small'));
+  fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+  expect(JSON.parse(onInput.mock.calls[0][1])).toEqual({
+    answers: { 'Second question?': ['Small'] },
+  });
+});
+
+it('resets same-form answers for a new exact native request, not a same-request snapshot', () => {
+  const request = {
+    version: 1 as const,
+    kind: 'question' as const,
+    requestId: 'request-1',
+    requestFingerprint: 'a'.repeat(64),
+    runId: 'run-1',
+    attemptId: 'attempt-1',
+    expiresAt: '2099-01-01T00:00:00Z',
+  };
+  const first = view({
+    state: 'needs_input',
+    type: 'needs_input',
+    needsInput: {
+      prompt: 'Choose.',
+      inputType: 'native_question',
+      nativeInputRequest: request,
+      questionForm: {
+        questions: [
+          {
+            key: 'Size?',
+            label: 'Size?',
+            multiSelect: false,
+            options: [
+              { value: 'Small', label: 'Small' },
+              { value: 'Other', label: 'Other' },
+            ],
+          },
+        ],
+      },
+    },
+  });
+  const { rerender } = render(<CallActivity tasks={[first]} onInput={vi.fn()} />);
+  fireEvent.click(screen.getByLabelText('Small'));
+  rerender(<CallActivity tasks={[{ ...first, sequence: 2 }]} onInput={vi.fn()} />);
+  expect(screen.getByLabelText('Small')).toBeChecked();
+  rerender(
+    <CallActivity
+      tasks={[
+        {
+          ...first,
+          sequence: 3,
+          needsInput: {
+            ...first.needsInput!,
+            nativeInputRequest: {
+              ...request,
+              requestId: 'request-2',
+              requestFingerprint: 'b'.repeat(64),
+            },
+          },
+        },
+      ]}
+      onInput={vi.fn()}
+    />
+  );
+  expect(screen.getByLabelText('Small')).not.toBeChecked();
+});
+
+it.each(['__proto__', 'constructor'])(
+  'renders and submits reserved native question key %s',
+  (key) => {
+    const onInput = vi.fn();
+    render(
+      <CallActivity
+        tasks={[
+          view({
+            state: 'needs_input',
+            type: 'needs_input',
+            needsInput: {
+              prompt: 'Choose.',
+              inputType: 'native_question',
+              questionForm: {
+                questions: [
+                  {
+                    key,
+                    label: key,
+                    multiSelect: false,
+                    options: [{ value: 'Other', label: 'Other' }],
+                  },
+                ],
+              },
+            },
+          }),
+        ]}
+        onInput={onInput}
+      />
+    );
+    fireEvent.click(screen.getByLabelText('Other'));
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(JSON.parse(onInput.mock.calls[0][1])).toEqual({ answers: { [key]: ['Other'] } });
+  }
+);
+
+it('keeps exact native action detail closed and resets disclosure for a replacement request', () => {
+  const onInput = vi.fn();
+  const needsInput = {
+    prompt: 'May I create the file? Allow once or Deny.',
+    inputType: 'choice' as const,
+    choices: [{ value: 'allow', label: 'Allow once' }],
+    nativeInputRequest: {
+      version: 1 as const,
+      kind: 'permission' as const,
+      requestId: 'permission-detail',
+      requestFingerprint: 'a'.repeat(64),
+      runId: 'run-detail',
+      attemptId: 'attempt-detail',
+      expiresAt: '2099-01-01T00:00:00.000Z',
+    },
+    operationTitle: 'Create synthetic.txt in the working folder.',
+  };
+  const { rerender } = render(
+    <CallActivity
+      tasks={[view({ state: 'needs_input', type: 'needs_input', needsInput })]}
+      onInput={onInput}
+    />
+  );
+  const details = screen.getByText('Action details').closest('details')!;
+  expect(details).not.toHaveAttribute('open');
+  expect(screen.getByText(needsInput.operationTitle)).not.toBeVisible();
+  fireEvent.click(screen.getByText('Action details'));
+  expect(onInput).not.toHaveBeenCalled();
+  details.setAttribute('open', '');
+  expect(screen.getByText(needsInput.operationTitle)).toBeVisible();
+  rerender(
+    <CallActivity
+      tasks={[
+        view({
+          state: 'needs_input',
+          type: 'needs_input',
+          needsInput: {
+            ...needsInput,
+            operationTitle: 'Read synthetic.txt',
+            nativeInputRequest: {
+              ...needsInput.nativeInputRequest,
+              requestFingerprint: 'b'.repeat(64),
+            },
+          },
+        }),
+      ]}
+      onInput={onInput}
+    />
+  );
+  expect(screen.getByText('Action details').closest('details')).not.toBe(details);
+  expect(screen.getByText('Action details').closest('details')).not.toHaveAttribute('open');
+  expect(screen.queryByText(needsInput.operationTitle)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Allow once' }));
+  expect(onInput).toHaveBeenCalledWith('task-1', 'allow');
+});
