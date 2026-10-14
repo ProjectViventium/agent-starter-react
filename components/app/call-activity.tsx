@@ -77,6 +77,95 @@ function taskLabel(task: VoiceTaskEventV1) {
   return task.label || taskPhase(task);
 }
 
+function NativeQuestionInput({
+  form,
+  pending,
+  onSubmit,
+}: {
+  form: NonNullable<VoiceTaskEventV1['needsInput']>['questionForm'];
+  pending: boolean;
+  onSubmit: (input: string) => void;
+}) {
+  const [answers, setAnswers] = React.useState<Record<string, string[]>>({});
+  const [notes, setNotes] = React.useState<Record<string, string>>({});
+  if (!form) return null;
+  const valid = Object.keys(answers).length > 0;
+  return (
+    <form
+      className="space-y-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!valid) return;
+        const annotations = Object.fromEntries(
+          Object.entries(answers)
+            .filter(
+              ([key, values]) =>
+                values.includes('Other') && Object.hasOwn(notes, key) && notes[key]?.length > 0
+            )
+            .map(([key]) => [key, { notes: notes[key] }])
+        );
+        onSubmit(
+          JSON.stringify({ answers, ...(Object.keys(annotations).length ? { annotations } : {}) })
+        );
+      }}
+    >
+      {form.questions.map((question) => (
+        <fieldset key={question.key} disabled={pending} className="space-y-2">
+          <legend className="text-sm">{question.label}</legend>
+          {question.options.map((option) => (
+            <label key={option.value} className="flex gap-2 text-sm">
+              <input
+                type={question.multiSelect ? 'checkbox' : 'radio'}
+                name={question.key}
+                checked={
+                  (Object.hasOwn(answers, question.key)
+                    ? answers[question.key]?.includes(option.value)
+                    : false) || false
+                }
+                onChange={(event) =>
+                  setAnswers((current) => {
+                    const before = Object.hasOwn(current, question.key)
+                      ? current[question.key]
+                      : [];
+                    const selected = event.target.checked
+                      ? question.multiSelect
+                        ? [...before, option.value]
+                        : [option.value]
+                      : before.filter((value) => value !== option.value);
+                    const next = selected.length
+                      ? { ...current, [question.key]: selected }
+                      : { ...current };
+                    if (!selected.length) delete next[question.key];
+                    return next;
+                  })
+                }
+              />
+              {option.label}
+            </label>
+          ))}
+          {Object.hasOwn(answers, question.key) && answers[question.key]?.includes('Other') && (
+            <label className="block text-sm">
+              Your answer
+              <textarea
+                aria-label={`Your answer: ${question.label}`}
+                maxLength={8000}
+                value={(Object.hasOwn(notes, question.key) ? notes[question.key] : '') || ''}
+                onChange={(event) =>
+                  setNotes((current) => ({ ...current, [question.key]: event.target.value }))
+                }
+                className="border-input bg-background w-full rounded-md border p-2"
+              />
+            </label>
+          )}
+        </fieldset>
+      ))}
+      <Button type="submit" size="sm" disabled={pending || !valid}>
+        Send
+      </Button>
+    </form>
+  );
+}
+
 function TaskItem({
   task,
   onCancel,
@@ -178,8 +267,27 @@ function TaskItem({
 
       {task.state === 'needs_input' && task.needsInput?.prompt ? (
         <div className="space-y-2">
-          <p className="text-sm break-words whitespace-pre-wrap">{task.needsInput.prompt}</p>
-          {onInput && task.needsInput.choices?.length ? (
+          <p className="whitespace-pre-wrap break-words text-sm">{task.needsInput.prompt}</p>
+          {task.needsInput.operationTitle &&
+          task.needsInput.nativeInputRequest?.kind === 'permission' ? (
+            <details key={task.needsInput.nativeInputRequest.requestFingerprint}>
+              <summary className="cursor-pointer text-sm">Action details</summary>
+              <p className="text-muted-foreground whitespace-pre-wrap break-words text-xs">
+                {task.needsInput.operationTitle}
+              </p>
+            </details>
+          ) : null}
+          {onInput && task.needsInput.questionForm ? (
+            <NativeQuestionInput
+              key={
+                task.needsInput.nativeInputRequest?.requestFingerprint ||
+                JSON.stringify(task.needsInput.questionForm)
+              }
+              form={task.needsInput.questionForm}
+              pending={pending}
+              onSubmit={(value) => onInput(task.taskId, value)}
+            />
+          ) : onInput && task.needsInput.choices?.length ? (
             <div className="flex flex-wrap gap-2">
               {task.needsInput.choices.map((choice) => (
                 <Button
