@@ -267,12 +267,12 @@ function TaskItem({
 
       {task.state === 'needs_input' && task.needsInput?.prompt ? (
         <div className="space-y-2">
-          <p className="whitespace-pre-wrap break-words text-sm">{task.needsInput.prompt}</p>
+          <p className="text-sm break-words whitespace-pre-wrap">{task.needsInput.prompt}</p>
           {task.needsInput.operationTitle &&
           task.needsInput.nativeInputRequest?.kind === 'permission' ? (
             <details key={task.needsInput.nativeInputRequest.requestFingerprint}>
               <summary className="cursor-pointer text-sm">Action details</summary>
-              <p className="text-muted-foreground whitespace-pre-wrap break-words text-xs">
+              <p className="text-muted-foreground text-xs break-words whitespace-pre-wrap">
                 {task.needsInput.operationTitle}
               </p>
             </details>
