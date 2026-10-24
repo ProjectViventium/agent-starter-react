@@ -25,7 +25,7 @@ import {
 } from '@/components/livekit/agent-control-bar/agent-control-bar';
 import { useCallEndLifecycle } from '@/hooks/useCallEndLifecycle';
 import { useCallResultBridge } from '@/hooks/useCallResultBridge';
-import type { VoiceCallMode } from '@/hooks/useCallSessionState';
+import type { CallKeepaliveReceipt, VoiceCallMode } from '@/hooks/useCallSessionState';
 import { useCallTaskActions } from '@/hooks/useCallTaskActions';
 import { useMicrophoneHealth } from '@/hooks/useMicrophoneHealth';
 import { useViventiumSessionMessages } from '@/hooks/useViventiumSessionMessages';
@@ -86,6 +86,7 @@ interface SessionViewProps {
   onLinkedChatHrefChange?: (href: string | null) => void;
   mode?: VoiceCallMode;
   authoritativeStatus?: VoiceCallStatus | null;
+  lastKeepalive?: CallKeepaliveReceipt | null;
   modePending?: boolean;
   onModeChange?: (mode: VoiceCallMode) => void;
   callStateError?: string | null;
@@ -103,6 +104,7 @@ export const SessionView = ({
   conversationId = null,
   mode = 'call',
   authoritativeStatus = null,
+  lastKeepalive = null,
   modePending = false,
   onModeChange,
   onLinkedChatHrefChange,
@@ -142,7 +144,7 @@ export const SessionView = ({
     loadingNewerSpeakers,
     loadNewerSpeakers,
     stopRecovery,
-  } = useViventiumVoiceEvents(session, callSessionId, agentIdentities);
+  } = useViventiumVoiceEvents(session, callSessionId, agentIdentities, lastKeepalive);
   useWingEngagement({
     session,
     callSessionId,

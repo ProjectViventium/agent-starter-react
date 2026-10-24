@@ -895,6 +895,7 @@ function AppSession({
           conversationId={expectedConversationId}
           mode={callSessionState.mode}
           authoritativeStatus={callSessionState.authoritativeStatus}
+          lastKeepalive={callSessionState.lastKeepalive}
           modePending={callSessionState.modePending}
           onModeChange={(mode) => void callSessionState.setMode(mode)}
           callStateError={callSessionState.callStateError}

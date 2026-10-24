@@ -3,6 +3,7 @@
 import * as React from 'react';
 import { RoomEvent } from 'livekit-client';
 import type { UseSessionReturn } from '@livekit/components-react';
+import type { CallKeepaliveReceipt } from '@/hooks/useCallSessionState';
 import { callBrowserCapabilityHeaders } from '@/lib/call-browser-capability';
 import { type CallIssue, callIssueFromResponse } from '@/lib/call-start';
 import {
@@ -219,7 +220,8 @@ async function requireSnapshotResponse(response: Response) {
 export function useViventiumVoiceEvents(
   session: UseSessionReturn,
   callSessionId: string | null = null,
-  expectedAgentIdentities: readonly string[] = []
+  expectedAgentIdentities: readonly string[] = [],
+  lastKeepalive: CallKeepaliveReceipt | null = null
 ) {
   const { room } = session;
   const [tasks, setTasks] = React.useState<VoiceTaskView[]>([]);
@@ -229,11 +231,14 @@ export function useViventiumVoiceEvents(
   );
   const [recoveryIssue, setRecoveryIssue] = React.useState<CallIssue | null>(null);
   const [recoveryRetryable, setRecoveryRetryable] = React.useState(false);
+  const [taskRecoveryIssue, setTaskRecoveryIssue] = React.useState<CallIssue | null>(null);
+  const [taskRecoveryRetryable, setTaskRecoveryRetryable] = React.useState(false);
   const [hasOlderSpeakers, setHasOlderSpeakers] = React.useState(false);
   const [loadingOlderSpeakers, setLoadingOlderSpeakers] = React.useState(false);
   const [hasNewerSpeakers, setHasNewerSpeakers] = React.useState(false);
   const [loadingNewerSpeakers, setLoadingNewerSpeakers] = React.useState(false);
   const loadSnapshotRef = React.useRef<(() => void) | null>(null);
+  const reconcileTasksRef = React.useRef<(() => void) | null>(null);
   const applyTaskEventRef = React.useRef<((event: VoiceTaskEventV1) => void) | null>(null);
   const loadOlderSpeakersRef = React.useRef<(() => void) | null>(null);
   const loadNewerSpeakersRef = React.useRef<(() => void) | null>(null);
@@ -291,6 +296,7 @@ export function useViventiumVoiceEvents(
 
     let disposed = false;
     let snapshotController: AbortController | null = null;
+    let taskController: AbortController | null = null;
     let olderController: AbortController | null = null;
     let olderCursor: { beforeSequence: number; beforeSegmentId: string } | null = null;
     let newerCursor: { afterSequence: number; afterSegmentId: string } | null = null;
@@ -444,55 +450,90 @@ export function useViventiumVoiceEvents(
         if (!disposed) setLoadingNewerSpeakers(false);
       }
     };
+    const loadTaskSnapshot = async (signal: AbortSignal) => {
+      let cursor = '';
+      const seenCursors = new Set<string>();
+      for (let pageIndex = 0; pageIndex < 64; pageIndex += 1) {
+        const response = await fetch(
+          `/api/call-tasks?callSessionId=${encodeURIComponent(callSessionId)}${cursor}`,
+          { cache: 'no-store', signal, headers: callBrowserCapabilityHeaders(callSessionId) }
+        );
+        const snapshot = parseSnapshotPayload(
+          await requireSnapshotResponse(response),
+          callSessionId
+        );
+        if (!snapshot) {
+          throw new SnapshotRecoveryError(
+            { kind: 'unknown', message: 'Call task recovery returned invalid data.' },
+            true
+          );
+        }
+        if (!disposed && !signal.aborted) {
+          snapshot.tasks.forEach((event) => applyTaskEventToStore(store, event));
+          setTasks(store.taskViews);
+        }
+        if (!snapshot.hasMore || !snapshot.nextBeforeCreatedAt || !snapshot.nextBeforeTaskId) {
+          break;
+        }
+        const nextCursor = `&beforeCreatedAt=${encodeURIComponent(snapshot.nextBeforeCreatedAt)}&beforeTaskId=${encodeURIComponent(snapshot.nextBeforeTaskId)}`;
+        if (seenCursors.has(nextCursor)) {
+          throw new SnapshotRecoveryError(
+            { kind: 'unknown', message: 'Call task recovery returned a repeated cursor.' },
+            true
+          );
+        }
+        seenCursors.add(nextCursor);
+        cursor = nextCursor;
+      }
+      if (!disposed && !signal.aborted) {
+        setTaskRecoveryIssue(null);
+        setTaskRecoveryRetryable(false);
+      }
+    };
+
+    const reconcileTasks = async () => {
+      if (disposed || snapshotController || taskController) return;
+      const controller = new AbortController();
+      taskController = controller;
+      let timedOut = false;
+      const timeoutId = window.setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, SNAPSHOT_RECOVERY_TIMEOUT_MS);
+      try {
+        await loadTaskSnapshot(controller.signal);
+      } catch (error) {
+        if (disposed || (controller.signal.aborted && !timedOut)) return;
+        setTaskRecoveryIssue(
+          error instanceof SnapshotRecoveryError
+            ? error.issue
+            : {
+                kind: 'gateway_down',
+                message: 'Call activity could not be refreshed. Live conversation can continue.',
+              }
+        );
+        setTaskRecoveryRetryable(error instanceof SnapshotRecoveryError ? error.retryable : true);
+      } finally {
+        window.clearTimeout(timeoutId);
+        if (taskController === controller) taskController = null;
+      }
+    };
     const loadSnapshot = async () => {
       if (!callSessionId || disposed) {
         return;
       }
       snapshotController?.abort();
-      snapshotController = new AbortController();
-      const signal = snapshotController.signal;
+      taskController?.abort();
+      const controller = new AbortController();
+      snapshotController = controller;
+      const signal = controller.signal;
       let timedOut = false;
       const timeoutId = window.setTimeout(() => {
         timedOut = true;
-        snapshotController?.abort();
+        controller.abort();
       }, SNAPSHOT_RECOVERY_TIMEOUT_MS);
       const results = await Promise.allSettled([
-        (async () => {
-          let cursor = '';
-          const seenCursors = new Set<string>();
-          for (let pageIndex = 0; pageIndex < 64; pageIndex += 1) {
-            const response = await fetch(
-              `/api/call-tasks?callSessionId=${encodeURIComponent(callSessionId)}${cursor}`,
-              { cache: 'no-store', signal, headers: callBrowserCapabilityHeaders(callSessionId) }
-            );
-            const snapshot = parseSnapshotPayload(
-              await requireSnapshotResponse(response),
-              callSessionId
-            );
-            if (!snapshot) {
-              throw new SnapshotRecoveryError(
-                { kind: 'unknown', message: 'Call task recovery returned invalid data.' },
-                true
-              );
-            }
-            if (!disposed) {
-              snapshot.tasks.forEach((event) => applyTaskEventToStore(store, event));
-              setTasks(store.taskViews);
-            }
-            if (!snapshot.hasMore || !snapshot.nextBeforeCreatedAt || !snapshot.nextBeforeTaskId) {
-              break;
-            }
-            const nextCursor = `&beforeCreatedAt=${encodeURIComponent(snapshot.nextBeforeCreatedAt)}&beforeTaskId=${encodeURIComponent(snapshot.nextBeforeTaskId)}`;
-            if (seenCursors.has(nextCursor)) {
-              throw new SnapshotRecoveryError(
-                { kind: 'unknown', message: 'Call task recovery returned a repeated cursor.' },
-                true
-              );
-            }
-            seenCursors.add(nextCursor);
-            cursor = nextCursor;
-          }
-        })(),
+        loadTaskSnapshot(signal),
         (async () => {
           const response = await fetch(
             `/api/call-speakers?callSessionId=${encodeURIComponent(callSessionId)}`,
@@ -532,30 +573,38 @@ export function useViventiumVoiceEvents(
         })(),
       ]);
       window.clearTimeout(timeoutId);
+      if (snapshotController === controller) snapshotController = null;
       if (disposed || (signal.aborted && !timedOut)) {
         return;
       }
       const rejected = results.find((result) => result.status === 'rejected');
+      const taskOnlyFailure = results[0].status === 'rejected' && results[1].status === 'fulfilled';
+      const setIssue = taskOnlyFailure ? setTaskRecoveryIssue : setRecoveryIssue;
+      const setRetryable = taskOnlyFailure ? setTaskRecoveryRetryable : setRecoveryRetryable;
+      if (taskOnlyFailure) {
+        setRecoveryIssue(null);
+        setRecoveryRetryable(false);
+      }
       if (timedOut) {
-        setRecoveryIssue({
+        setIssue({
           kind: 'gateway_down',
           message:
             'Call activity recovery timed out. Live conversation can continue while you retry.',
         });
-        setRecoveryRetryable(true);
+        setRetryable(true);
         return;
       }
       if (rejected?.status === 'rejected') {
         const reason = rejected.reason;
         if (reason instanceof SnapshotRecoveryError) {
-          setRecoveryIssue(reason.issue);
-          setRecoveryRetryable(reason.retryable);
+          setIssue(reason.issue);
+          setRetryable(reason.retryable);
         } else if (!(reason instanceof Error && reason.name === 'AbortError')) {
-          setRecoveryIssue({
+          setIssue({
             kind: reason instanceof TypeError ? 'gateway_down' : 'unknown',
             message: 'Call activity recovery failed. Live conversation can continue.',
           });
-          setRecoveryRetryable(reason instanceof TypeError);
+          setRetryable(reason instanceof TypeError);
         }
         console.warn('[Viventium] Call reconnect snapshot recovery failed');
         return;
@@ -570,8 +619,10 @@ export function useViventiumVoiceEvents(
       if (disposed) return;
       disposed = true;
       snapshotController?.abort();
+      taskController?.abort();
       olderController?.abort();
       loadSnapshotRef.current = null;
+      reconcileTasksRef.current = null;
       applyTaskEventRef.current = null;
       loadOlderSpeakersRef.current = null;
       loadNewerSpeakersRef.current = null;
@@ -580,6 +631,7 @@ export function useViventiumVoiceEvents(
     };
     stopRecoveryRef.current = stopRecovery;
     loadSnapshotRef.current = () => void loadSnapshot();
+    reconcileTasksRef.current = () => void reconcileTasks();
     applyTaskEventRef.current = (event) => {
       if (event.callSessionId !== callSessionId) return;
       const previous = store.taskViews;
@@ -601,6 +653,8 @@ export function useViventiumVoiceEvents(
       setLatestSpeakerSegment(null);
       setRecoveryIssue(null);
       setRecoveryRetryable(false);
+      setTaskRecoveryIssue(null);
+      setTaskRecoveryRetryable(false);
       setHasOlderSpeakers(false);
       setLoadingOlderSpeakers(false);
       setHasNewerSpeakers(false);
@@ -609,6 +663,12 @@ export function useViventiumVoiceEvents(
       pendingNewerSegments.clear();
     };
   }, [callSessionId, expectedAgentIdentities, room]);
+
+  const keepaliveCallId = lastKeepalive?.callSessionId;
+  const keepaliveSequence = lastKeepalive?.sequence;
+  React.useEffect(() => {
+    if (keepaliveCallId === callSessionId) reconcileTasksRef.current?.();
+  }, [callSessionId, keepaliveCallId, keepaliveSequence]);
 
   const retryRecovery = React.useCallback(() => loadSnapshotRef.current?.(), []);
   const applyAuthoritativeTaskEvent = React.useCallback(
@@ -627,8 +687,8 @@ export function useViventiumVoiceEvents(
       tasks,
       speakerSegments,
       latestSpeakerSegment,
-      recoveryIssue,
-      recoveryRetryable,
+      recoveryIssue: taskRecoveryIssue ?? recoveryIssue,
+      recoveryRetryable: taskRecoveryIssue ? taskRecoveryRetryable : recoveryRetryable,
       retryRecovery,
       applyAuthoritativeTaskEvent,
       hasOlderSpeakers,
@@ -650,6 +710,8 @@ export function useViventiumVoiceEvents(
       loadingNewerSpeakers,
       recoveryIssue,
       recoveryRetryable,
+      taskRecoveryIssue,
+      taskRecoveryRetryable,
       retryRecovery,
       applyAuthoritativeTaskEvent,
       speakerSegments,

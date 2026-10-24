@@ -530,4 +530,52 @@ describe('useCallSessionState mode contract', () => {
     expect(result.current.callStateRetryable).toBe(true);
     vi.useRealTimers();
   });
+
+  it('publishes a call-scoped receipt only for successful existing keepalives', async () => {
+    vi.useFakeTimers();
+    let reads = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => {
+        reads += 1;
+        return Promise.resolve(
+          jsonResponse(
+            {
+              version: 1,
+              callSessionId: 'call-pulse',
+              mode: 'call',
+              status: 'listening',
+              revision: 1,
+              updatedAt: '2026-08-09T12:00:00.000Z',
+            },
+            reads === 3 ? 503 : 200
+          )
+        );
+      })
+    );
+    const { result, unmount } = renderHook(() => useCallSessionState('call-pulse', true));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(result.current.lastKeepalive).toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(25_000);
+    });
+    expect(result.current.lastKeepalive).toEqual({ callSessionId: 'call-pulse', sequence: 1 });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(25_000);
+    });
+    expect(result.current.lastKeepalive?.sequence).toBe(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(25_000);
+    });
+    expect(result.current.lastKeepalive?.sequence).toBe(2);
+    unmount();
+    const stoppedAt = reads;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(25_000);
+    });
+    expect(reads).toBe(stoppedAt);
+    vi.useRealTimers();
+  });
 });
