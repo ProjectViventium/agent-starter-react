@@ -8,7 +8,7 @@ import type { AppConfig } from '@/app-config';
 import { LinkedChatLink } from '@/components/app/linked-chat-link';
 import { SessionView } from '@/components/app/session-view';
 import { WelcomeView } from '@/components/app/welcome-view';
-import type { VoiceCallMode } from '@/hooks/useCallSessionState';
+import type { CallKeepaliveReceipt, VoiceCallMode } from '@/hooks/useCallSessionState';
 import { retainedLinkedChatHref } from '@/lib/call-handoff';
 import type { CallIssue } from '@/lib/call-start';
 import type { VoiceCallStatus } from '@/lib/call-state';
@@ -49,6 +49,7 @@ interface ViewControllerProps {
   conversationId?: string | null;
   mode?: VoiceCallMode;
   authoritativeStatus?: VoiceCallStatus | null;
+  lastKeepalive?: CallKeepaliveReceipt | null;
   modePending?: boolean;
   onModeChange?: (mode: VoiceCallMode) => void;
   callStateError?: string | null;
@@ -71,6 +72,7 @@ export function ViewController({
   conversationId,
   mode,
   authoritativeStatus,
+  lastKeepalive,
   modePending,
   onModeChange,
   callStateError,
@@ -141,6 +143,7 @@ export function ViewController({
             onLinkedChatHrefChange={onLinkedChatHrefChange}
             mode={mode}
             authoritativeStatus={authoritativeStatus}
+            lastKeepalive={lastKeepalive}
             modePending={modePending}
             onModeChange={onModeChange}
             callStateError={callStateError}

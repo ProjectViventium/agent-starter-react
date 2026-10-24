@@ -31,6 +31,8 @@ const STARTUP_SETTLED_CALL_STATUSES = new Set<VoiceCallStatus>([
 
 export type VoiceCallMode = 'call' | 'wing' | 'listen_only';
 
+export type CallKeepaliveReceipt = { callSessionId: string; sequence: number };
+
 type CallSessionStateResponse = {
   callSessionId?: string;
   roomName?: string;
@@ -61,6 +63,7 @@ export type UseCallSessionStateResult = {
   callStateIssue: CallIssue | null;
   callStateRetryable: boolean;
   lastModeTransition: VoiceCallStateV1 | null;
+  lastKeepalive: CallKeepaliveReceipt | null;
   setMode: (mode: VoiceCallMode) => Promise<boolean>;
   setWingModeEnabled: (enabled: boolean) => Promise<boolean>;
   setListenOnlyModeEnabled: (enabled: boolean) => Promise<boolean>;
@@ -220,6 +223,7 @@ export function useCallSessionState(
   const [callStateIssue, setCallStateIssue] = useState<CallIssue | null>(null);
   const [callStateRetryable, setCallStateRetryable] = useState(false);
   const [lastModeTransition, setLastModeTransition] = useState<VoiceCallStateV1 | null>(null);
+  const [lastKeepalive, setLastKeepalive] = useState<CallKeepaliveReceipt | null>(null);
   const stateRequestGenerationRef = useRef(0);
   const stateRequestsInFlightRef = useRef(new Map<string, number>());
   const latestCallStatusRef = useRef<VoiceCallStatus | null>(null);
@@ -311,6 +315,7 @@ export function useCallSessionState(
     setCallStateIssue(null);
     setCallStateRetryable(false);
     setLastModeTransition(null);
+    setLastKeepalive(null);
     latestCallStatusRef.current = null;
     if (!callSessionId) {
       return;
@@ -446,6 +451,12 @@ export function useCallSessionState(
           return;
         }
         applyState(next);
+        if (!startup) {
+          setLastKeepalive((current) => ({
+            callSessionId,
+            sequence: current?.callSessionId === callSessionId ? current.sequence + 1 : 1,
+          }));
+        }
       } catch (error) {
         if (cancelled) {
           return;
@@ -581,6 +592,7 @@ export function useCallSessionState(
     callStateIssue,
     callStateRetryable,
     lastModeTransition,
+    lastKeepalive,
     setMode,
     setWingModeEnabled,
     setListenOnlyModeEnabled,

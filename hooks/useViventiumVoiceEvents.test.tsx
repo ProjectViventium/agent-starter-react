@@ -2,6 +2,7 @@ import { RoomEvent } from 'livekit-client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UseSessionReturn } from '@livekit/components-react';
 import { act, renderHook, waitFor } from '@testing-library/react';
+import { useCallSessionState } from '@/hooks/useCallSessionState';
 import { useViventiumVoiceEvents } from '@/hooks/useViventiumVoiceEvents';
 import {
   type SpeakerSegmentV1,
@@ -584,5 +585,222 @@ describe('useViventiumVoiceEvents', () => {
       result.current.speakerSegments.length
     );
     expect(observed.size).toBe(4_201);
+  });
+
+  it('uses a successful keepalive to recover a completely missed terminal without reloading speakers', async () => {
+    let taskReads = 0;
+    const fetchMock = vi.fn((url: string) =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify(
+            url.startsWith('/api/call-speakers')
+              ? {
+                  version: 1,
+                  segments: [segment()],
+                  hasMore: true,
+                  nextBeforeSequence: 1,
+                  nextBeforeSegmentId: 'segment-1',
+                }
+              : {
+                  version: 1,
+                  events: [
+                    task({
+                      type: 'snapshot',
+                      sequence: ++taskReads,
+                      eventId: `snapshot-${taskReads}`,
+                      state: taskReads === 1 ? 'running' : 'completed',
+                    }),
+                  ],
+                }
+          )
+        )
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const { session } = fakeSession();
+    const { result, rerender } = renderHook(
+      ({ sequence }) =>
+        useViventiumVoiceEvents(session, 'call-1', expectedAgentIdentities, {
+          callSessionId: 'call-1',
+          sequence,
+        }),
+      { initialProps: { sequence: 0 } }
+    );
+    await waitFor(() => expect(result.current.tasks[0]?.state).toBe('running'));
+    const originalSpeakers = result.current.speakerSegments;
+    expect(result.current.hasOlderSpeakers).toBe(true);
+    rerender({ sequence: 1 });
+    await waitFor(() => expect(result.current.tasks[0]?.state).toBe('completed'));
+    expect(result.current.speakerSegments).toBe(originalSpeakers);
+    expect(result.current.hasOlderSpeakers).toBe(true);
+    expect(
+      fetchMock.mock.calls.filter(([url]) => url.startsWith('/api/call-speakers'))
+    ).toHaveLength(1);
+  });
+
+  it('does not overlap task refreshes and aborts a stale refresh on call switch or end', async () => {
+    let taskReads = 0;
+    let resolveOld!: (response: Response) => void;
+    let oldSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url.startsWith('/api/call-tasks') && url.includes('call-1') && ++taskReads > 1) {
+        oldSignal = init?.signal as AbortSignal;
+        return new Promise<Response>((resolve) => {
+          resolveOld = resolve;
+        });
+      }
+      return Promise.resolve(
+        new Response(
+          JSON.stringify(
+            url.startsWith('/api/call-speakers')
+              ? { version: 1, segments: [] }
+              : { version: 1, events: [] }
+          )
+        )
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { session } = fakeSession();
+    const { result, rerender } = renderHook(
+      ({ id, sequence }) =>
+        useViventiumVoiceEvents(session, id, expectedAgentIdentities, {
+          callSessionId: id,
+          sequence,
+        }),
+      { initialProps: { id: 'call-1', sequence: 0 } }
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    rerender({ id: 'call-1', sequence: 1 });
+    await waitFor(() => expect(resolveOld).toBeTypeOf('function'));
+    rerender({ id: 'call-1', sequence: 2 });
+    expect(taskReads).toBe(2);
+    rerender({ id: 'call-2', sequence: 0 });
+    expect(oldSignal?.aborted).toBe(true);
+    await act(async () => {
+      resolveOld(
+        new Response(
+          JSON.stringify({ version: 1, events: [task({ state: 'completed', sequence: 9 })] })
+        )
+      );
+    });
+    expect(result.current.tasks).toEqual([]);
+    act(() => result.current.stopRecovery());
+    const reads = fetchMock.mock.calls.length;
+    rerender({ id: 'call-2', sequence: 1 });
+    expect(fetchMock.mock.calls.length).toBe(reads);
+  });
+
+  it.each([1, 2])(
+    'recovers task refresh errors from failed read %s on a later successful keepalive',
+    async (failedRead) => {
+      let taskReads = 0;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((url: string) => {
+          if (url.startsWith('/api/call-speakers'))
+            return Promise.resolve(new Response(JSON.stringify({ version: 1, segments: [] })));
+          taskReads += 1;
+          return Promise.resolve(
+            new Response(
+              JSON.stringify(
+                taskReads === failedRead
+                  ? { message: 'Temporarily unavailable' }
+                  : {
+                      version: 1,
+                      events: [
+                        task({
+                          type: 'snapshot',
+                          sequence: taskReads,
+                          eventId: `snapshot-${taskReads}`,
+                        }),
+                      ],
+                    }
+              ),
+              { status: taskReads === failedRead ? 503 : 200 }
+            )
+          );
+        })
+      );
+      const { session } = fakeSession();
+      const { result, rerender } = renderHook(
+        ({ sequence }) =>
+          useViventiumVoiceEvents(session, 'call-1', expectedAgentIdentities, {
+            callSessionId: 'call-1',
+            sequence,
+          }),
+        { initialProps: { sequence: 0 } }
+      );
+      if (failedRead === 2) {
+        await waitFor(() => expect(result.current.tasks).toHaveLength(1));
+        rerender({ sequence: 1 });
+      }
+      await waitFor(() => expect(result.current.recoveryIssue).not.toBeNull());
+      expect(result.current.recoveryRetryable).toBe(true);
+      rerender({ sequence: failedRead });
+      await waitFor(() => expect(result.current.tasks[0]?.sequence).toBe(failedRead + 1));
+      expect(result.current.recoveryIssue).toBeNull();
+    }
+  );
+
+  it('heals missed room packets through the actual existing keepalive hook and task snapshot', async () => {
+    vi.useFakeTimers();
+    let taskReads = 0;
+    const fetchMock = vi.fn((url: string) =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify(
+            url.startsWith('/api/call-session-state')
+              ? {
+                  version: 1,
+                  callSessionId: 'call-1',
+                  mode: 'call',
+                  status: 'listening',
+                  revision: 1,
+                  updatedAt: '2026-08-09T12:00:00.000Z',
+                }
+              : url.startsWith('/api/call-speakers')
+                ? { version: 1, segments: [segment()] }
+                : {
+                    version: 1,
+                    events: [
+                      task({
+                        type: 'snapshot',
+                        sequence: ++taskReads,
+                        eventId: `snapshot-${taskReads}`,
+                        state: taskReads === 1 ? 'running' : 'completed',
+                      }),
+                    ],
+                  }
+          )
+        )
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const { session } = fakeSession();
+    const { result, unmount } = renderHook(() => {
+      const state = useCallSessionState('call-1', true);
+      return useViventiumVoiceEvents(
+        session,
+        'call-1',
+        expectedAgentIdentities,
+        state.lastKeepalive
+      );
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(result.current.tasks[0]?.state).toBe('running');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(25_000);
+    });
+    expect(result.current.tasks[0]?.state).toBe('completed');
+    expect(
+      fetchMock.mock.calls.filter(([url]) => url.startsWith('/api/call-speakers'))
+    ).toHaveLength(1);
+    expect(taskReads).toBe(2);
+    unmount();
+    vi.useRealTimers();
   });
 });
