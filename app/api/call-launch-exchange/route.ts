@@ -41,7 +41,24 @@ export async function POST(request: Request) {
       { status: 503, headers: responseHeaders() }
     );
   }
+  const configuredTimeout = Number(process.env.VIVENTIUM_CALL_PROXY_TIMEOUT_MS);
+  const timeoutMs =
+    Number.isFinite(configuredTimeout) && configuredTimeout >= 1 && configuredTimeout <= 60_000
+      ? configuredTimeout
+      : 4_500;
+  const controller = new AbortController();
+  const cancelUpstream = () => controller.abort();
+  request.signal.addEventListener('abort', cancelUpstream, { once: true });
+  let timedOut = false;
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   try {
+    if (request.signal.aborted) {
+      controller.abort();
+      throw new Error('Request aborted');
+    }
     const target = new URL(
       `/api/viventium/calls/${encodeURIComponent(callSessionId)}/browser-capability/exchange`,
       origin
@@ -55,6 +72,7 @@ export async function POST(request: Request) {
       },
       cache: 'no-store',
       redirect: 'error',
+      signal: controller.signal,
     });
     const text = await response.text();
     let payload: unknown = {};
@@ -95,8 +113,17 @@ export async function POST(request: Request) {
     );
   } catch {
     return NextResponse.json(
-      { code: 'gateway_down', message: 'Calling is temporarily unavailable.', retryable: true },
-      { status: 503, headers: responseHeaders() }
+      {
+        code: 'gateway_down',
+        message: timedOut
+          ? 'Calling timed out. Please try again.'
+          : 'Calling is temporarily unavailable.',
+        retryable: true,
+      },
+      { status: timedOut ? 504 : 503, headers: responseHeaders() }
     );
+  } finally {
+    clearTimeout(timeoutId);
+    request.signal.removeEventListener('abort', cancelUpstream);
   }
 }

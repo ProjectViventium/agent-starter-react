@@ -6,6 +6,162 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe('useCallSessionState response body deadlines', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function stalledJsonResponse(signal: AbortSignal, status = 200) {
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: vi.fn(
+        () =>
+          new Promise<unknown>((_resolve, reject) => {
+            const abort = () => reject(new DOMException('Aborted', 'AbortError'));
+            if (signal.aborted) {
+              abort();
+            } else {
+              signal.addEventListener('abort', abort, { once: true });
+            }
+          })
+      ),
+    } as unknown as Response;
+  }
+
+  function listeningState(callSessionId: string) {
+    return {
+      version: 1,
+      callSessionId,
+      mode: 'call',
+      status: 'listening',
+      revision: 1,
+      updatedAt: '2026-08-09T12:00:00.000Z',
+    };
+  }
+
+  it.each([200, 401])('bounds a stalled JSON body after %s headers', async (status) => {
+    vi.useFakeTimers();
+    const observed: { signal?: AbortSignal } = {};
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+      observed.signal = init?.signal as AbortSignal;
+      return Promise.resolve(stalledJsonResponse(observed.signal, status));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { result, unmount } = renderHook(() => useCallSessionState('call-body-stall', false));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+
+    expect(observed.signal?.aborted).toBe(true);
+    expect(result.current.callStateIssue?.kind).toBe('gateway_down');
+    expect(result.current.callStateRetryable).toBe(true);
+    expect(result.current.authoritativeStatus).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('releases a stalled keepalive so the next existing interval can recover', async () => {
+    vi.useFakeTimers();
+    const state = listeningState('call-keepalive-body');
+    const observed: { signal?: AbortSignal } = {};
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(state))
+      .mockImplementationOnce((_url: string, init?: RequestInit) => {
+        observed.signal = init?.signal as AbortSignal;
+        return Promise.resolve(stalledJsonResponse(observed.signal));
+      })
+      .mockResolvedValueOnce(jsonResponse(state));
+    vi.stubGlobal('fetch', fetchMock);
+    const { result, unmount } = renderHook(() => useCallSessionState('call-keepalive-body', true));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(result.current.callStateIssue?.kind).toBe('gateway_down');
+    expect(result.current.lastKeepalive).toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+
+    expect(observed.signal?.aborted).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toEqual({
+      callSessionId: 'call-keepalive-body',
+      touch: true,
+    });
+    expect(result.current.lastKeepalive).toEqual({
+      callSessionId: 'call-keepalive-body',
+      sequence: 1,
+    });
+    expect(result.current.callStateIssue).toBeNull();
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('keeps parent cancellation active until the JSON body settles', async () => {
+    vi.useFakeTimers();
+    const observed: { signal?: AbortSignal; response?: Response } = {};
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+      observed.signal = init?.signal as AbortSignal;
+      observed.response = stalledJsonResponse(observed.signal);
+      return Promise.resolve(observed.response);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { result, unmount } = renderHook(() => useCallSessionState('call-body-cancel', false));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(observed.response?.json).toHaveBeenCalledOnce();
+
+    unmount();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(observed.signal?.aborted).toBe(true);
+    expect(result.current.callStateIssue).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('retains the existing malformed JSON fallback and clears the completed deadline', async () => {
+    vi.useFakeTimers();
+    const observed: { signal?: AbortSignal } = {};
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, init?: RequestInit) => {
+        observed.signal = init?.signal as AbortSignal;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.reject(new SyntaxError('Invalid JSON')),
+        } as Response);
+      })
+    );
+    const { result, unmount } = renderHook(() => useCallSessionState('call-body-malformed', false));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(result.current.mode).toBe('call');
+    expect(result.current.authoritativeStatus).toBeNull();
+    expect(result.current.callStateIssue).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(observed.signal?.aborted).toBe(false);
+    unmount();
+  });
+});
+
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,

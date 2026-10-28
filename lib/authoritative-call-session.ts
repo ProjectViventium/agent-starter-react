@@ -155,6 +155,7 @@ export async function fetchAuthoritativeCallSession(
     controller.abort();
   }, canonicalRequestTimeoutMs());
   let response: Response;
+  let payload: unknown;
   try {
     response = await fetch(
       new URL(
@@ -173,6 +174,10 @@ export async function fetchAuthoritativeCallSession(
         signal: controller.signal,
       }
     );
+    payload = await response.json().catch((error: unknown) => {
+      if (controller.signal.aborted) throw error;
+      return null;
+    });
   } catch {
     throw new AuthoritativeCallSessionError(
       'gateway_down',
@@ -185,7 +190,6 @@ export async function fetchAuthoritativeCallSession(
   } finally {
     clearTimeout(timeoutId);
   }
-  const payload = await response.json().catch(() => null);
   if (!response.ok) {
     const failure = normalizeProxyFailure(response.status, payload);
     throw new AuthoritativeCallSessionError(

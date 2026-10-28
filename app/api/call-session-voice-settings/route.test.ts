@@ -81,3 +81,96 @@ describe('call voice settings label carrier', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+describe('voice settings response body deadline', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    delete process.env.VIVENTIUM_VOICE_SETTINGS_PROXY_TIMEOUT_MS;
+  });
+
+  const configure = () => {
+    vi.useFakeTimers();
+    process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'https://librechat.example.com';
+    process.env.VIVENTIUM_CALL_SESSION_SECRET = 'synthetic-server-secret';
+    process.env.VIVENTIUM_VOICE_SETTINGS_PROXY_TIMEOUT_MS = '10';
+  };
+  const request = () =>
+    new Request(
+      'https://playground.example.com/api/call-session-voice-settings?callSessionId=call-1',
+      { headers: { 'X-VIVENTIUM-CALL-CAPABILITY': 'A'.repeat(43) } }
+    );
+
+  it.each([200, 410])('bounds a stalled HTTP%s body after headers', async (status) => {
+    configure();
+    const observation: { signal?: AbortSignal } = {};
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/capabilities')) return new Response('{}');
+      observation.signal = init?.signal ?? undefined;
+      return {
+        status,
+        text: () =>
+          new Promise<string>((_resolve, reject) => {
+            observation.signal?.addEventListener(
+              'abort',
+              () => {
+                const error = new Error('Aborted');
+                error.name = 'AbortError';
+                reject(error);
+              },
+              { once: true }
+            );
+          }),
+      } as Response;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { GET } = await import('@/app/api/call-session-voice-settings/route');
+    let settled = false;
+    const pending = GET(request()).then((response) => {
+      settled = true;
+      return response;
+    });
+    await vi.advanceTimersByTimeAsync(11);
+    expect(settled).toBe(true);
+    const response = await pending;
+    expect(response.status).toBe(504);
+    await expect(response.json()).resolves.toMatchObject({ code: 'gateway_down', retryable: true });
+    expect(observation.signal?.aborted).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    [
+      200,
+      JSON.stringify({ requestedVoiceRoute: { sttProvider: 'declared-provider' } }),
+      { requestedVoiceRoute: { sttProvider: 'declared-provider' } },
+    ],
+    [200, 'plain response', { message: 'plain response' }],
+    [
+      410,
+      JSON.stringify({ code: 'auth_expired', message: 'This call has ended.', retryable: false }),
+      { code: 'auth_expired', message: 'This call has ended.', retryable: false },
+    ],
+  ] as const)(
+    'keeps completed HTTP%s payloads and clears their deadline',
+    async (status, body, expected) => {
+      configure();
+      const observation: { signal?: AbortSignal } = {};
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string, init?: RequestInit) => {
+          if (url.endsWith('/capabilities')) return new Response('{}');
+          observation.signal = init?.signal ?? undefined;
+          return new Response(body, { status });
+        })
+      );
+      const { GET } = await import('@/app/api/call-session-voice-settings/route');
+      const response = await GET(request());
+      expect(response.status).toBe(status);
+      await expect(response.json()).resolves.toMatchObject(expected);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(11);
+      expect(observation.signal?.aborted).toBe(false);
+    }
+  );
+});

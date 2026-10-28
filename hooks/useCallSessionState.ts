@@ -147,6 +147,7 @@ async function requestCallSessionState(
     controller.abort();
   }, CALL_STATE_REQUEST_TIMEOUT_MS);
   let response: Response;
+  let payload: CallSessionStateResponse;
   try {
     response = await fetch(url, {
       method,
@@ -164,6 +165,12 @@ async function requestCallSessionState(
       cache: 'no-store',
       signal: controller.signal,
     });
+    payload = (await response.json().catch((error) => {
+      if (controller.signal.aborted) {
+        throw error;
+      }
+      return {};
+    })) as CallSessionStateResponse;
   } catch (error) {
     if (timedOut) {
       throw new CallRequestError(
@@ -180,7 +187,6 @@ async function requestCallSessionState(
     signal?.removeEventListener('abort', abortFromParent);
   }
 
-  const payload = (await response.json().catch(() => ({}))) as CallSessionStateResponse;
   const normalized = normalizeResponse(payload, callSessionId);
   if (!response.ok) {
     const issue = callIssueFromResponse(response.status, payload);

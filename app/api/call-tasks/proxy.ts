@@ -107,6 +107,7 @@ export async function proxyCallTaskRequest(
   }
 
   let response: Response;
+  let payload: unknown;
   const controller = new AbortController();
   let timedOut = false;
   const timeoutId = setTimeout(() => {
@@ -125,6 +126,12 @@ export async function proxyCallTaskRequest(
       body: method === 'POST' ? JSON.stringify(body ?? {}) : undefined,
       cache: 'no-store',
       signal: controller.signal,
+    });
+    payload = await response.json().catch((error) => {
+      if (controller.signal.aborted) {
+        throw error;
+      }
+      return null;
     });
   } catch {
     if (timedOut) {
@@ -149,7 +156,6 @@ export async function proxyCallTaskRequest(
     clearTimeout(timeoutId);
   }
 
-  const payload = await response.json().catch(() => null);
   if (!response.ok) {
     const conflict =
       response.status === 409

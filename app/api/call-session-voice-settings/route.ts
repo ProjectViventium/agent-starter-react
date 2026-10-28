@@ -61,6 +61,7 @@ async function proxyVoiceSettingsRequest(
   }, getVoiceSettingsProxyTimeoutMs());
 
   let response: Response;
+  let text: string;
   try {
     response = await fetch(url.toString(), {
       method,
@@ -69,6 +70,7 @@ async function proxyVoiceSettingsRequest(
       cache: 'no-store',
       signal: controller.signal,
     });
+    text = await response.text();
   } catch (error) {
     if (timedOut) {
       return {
@@ -85,7 +87,6 @@ async function proxyVoiceSettingsRequest(
     clearTimeout(timeoutId);
   }
 
-  const text = await response.text();
   let payload: unknown = null;
   if (text) {
     try {
