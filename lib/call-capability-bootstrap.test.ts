@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CALL_CAPABILITY_BOOTSTRAP_SCRIPT } from '@/lib/call-capability-bootstrap';
 
 describe('pre-hydration call capability bootstrap', () => {
@@ -241,4 +241,142 @@ describe('existing-chat navigation through capability bootstrap', () => {
       expect(target.hash).toBe('');
     }
   );
+});
+
+describe('call launch exchange response-body deadline', () => {
+  afterEach(() => vi.useRealTimers());
+
+  function launchWindow(fetch: (url: string, init: RequestInit) => Promise<unknown>) {
+    const storage = new Map<string, string>();
+    return {
+      storage,
+      window: {
+        location: {
+          search: '?callSessionId=call-body-deadline',
+          hash: `#viventiumCallLaunch=${'L'.repeat(43)}`,
+          pathname: '/call-bootstrap',
+          replace: vi.fn(),
+        },
+        history: { state: null, replaceState: vi.fn() },
+        sessionStorage: {
+          getItem: (key: string) => storage.get(key) || null,
+          setItem: (key: string, value: string) => storage.set(key, value),
+          removeItem: (key: string) => storage.delete(key),
+        },
+        setTimeout,
+        clearTimeout,
+        AbortController,
+        crypto: {
+          getRandomValues: (bytes: Uint8Array) => {
+            bytes.fill(7);
+            return bytes;
+          },
+        },
+        btoa: (value: string) => Buffer.from(value, 'binary').toString('base64'),
+        fetch,
+      },
+    };
+  }
+
+  it.each([200, 401])(
+    'bounds a stalled response body after status %s, reusing the same launch binding',
+    async (status) => {
+      vi.useFakeTimers();
+      const signals: AbortSignal[] = [];
+      const bindings: string[] = [];
+      const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+        const signal = init.signal as AbortSignal;
+        signals.push(signal);
+        bindings.push(new Headers(init.headers).get('X-VIVENTIUM-CALL-LAUNCH-IDEMPOTENCY') || '');
+        return {
+          ok: status === 200,
+          status,
+          text: () =>
+            new Promise<string>((_resolve, reject) => {
+              signal.addEventListener('abort', () => reject(new Error('body aborted')), {
+                once: true,
+              });
+            }),
+        };
+      });
+      const fixture = launchWindow(fetchMock);
+      new Function('window', 'document', CALL_CAPABILITY_BOOTSTRAP_SCRIPT)(fixture.window, {
+        referrer: '',
+      });
+      await vi.advanceTimersByTimeAsync(16_000);
+
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(signals.every((signal) => signal.aborted)).toBe(true);
+      expect(new Set(bindings).size).toBe(1);
+      expect(bindings[0]).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(fixture.window.location.replace).toHaveBeenCalledOnce();
+      expect(fixture.storage.has('viventium.call.capability.v1:call-body-deadline')).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+    }
+  );
+
+  it('recovers a timed-out body with the same binding without accepting a second launch', async () => {
+    vi.useFakeTimers();
+    const bindings: string[] = [];
+    let firstSignal: AbortSignal | null = null;
+    let attempts = 0;
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      bindings.push(new Headers(init.headers).get('X-VIVENTIUM-CALL-LAUNCH-IDEMPOTENCY') || '');
+      attempts += 1;
+      if (attempts === 1) {
+        firstSignal = init.signal as AbortSignal;
+        return {
+          ok: true,
+          status: 200,
+          text: () =>
+            new Promise<string>((_resolve, reject) => {
+              firstSignal!.addEventListener('abort', () => reject(new Error('body aborted')), {
+                once: true,
+              });
+            }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            version: 1,
+            callSessionId: 'call-body-deadline',
+            browserCapability: 'B'.repeat(43),
+          }),
+      };
+    });
+    const fixture = launchWindow(fetchMock);
+    new Function('window', 'document', CALL_CAPABILITY_BOOTSTRAP_SCRIPT)(fixture.window, {
+      referrer: '',
+    });
+    await vi.advanceTimersByTimeAsync(5_300);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(firstSignal!.aborted).toBe(true);
+    expect(new Set(bindings).size).toBe(1);
+    expect(fixture.storage.get('viventium.call.capability.v1:call-body-deadline')).toBe(
+      'B'.repeat(43)
+    );
+    expect(fixture.storage.has('viventium.call.launch-idempotency.v1:call-body-deadline')).toBe(
+      false
+    );
+    expect(fixture.window.location.replace).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('keeps a completed terminal rejection final without retry or retained timer', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 410, text: async () => '{}' }));
+    const fixture = launchWindow(fetchMock);
+    new Function('window', 'document', CALL_CAPABILITY_BOOTSTRAP_SCRIPT)(fixture.window, {
+      referrer: '',
+    });
+    await vi.advanceTimersByTimeAsync(16_000);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fixture.window.location.replace).toHaveBeenCalledOnce();
+    expect(fixture.storage.has('viventium.call.capability.v1:call-body-deadline')).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });

@@ -52,6 +52,7 @@ async function proxyStateRequest(
     controller.abort();
   }, timeoutMs);
   let response: Response;
+  let text: string;
   try {
     response = await fetch(url.toString(), {
       method,
@@ -60,6 +61,7 @@ async function proxyStateRequest(
       cache: 'no-store',
       signal: controller.signal,
     });
+    text = await response.text();
   } catch (error) {
     if (timedOut) {
       return NextResponse.json(
@@ -76,7 +78,6 @@ async function proxyStateRequest(
     clearTimeout(timeoutId);
   }
 
-  const text = await response.text();
   let payload: unknown = null;
   if (text) {
     try {

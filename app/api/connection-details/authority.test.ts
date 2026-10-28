@@ -1315,3 +1315,91 @@ describe('authoritative token hydration independent of advisory settings', () =>
     }
   );
 });
+
+describe('canonical call response-body deadline', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it.each([200, 401])('bounds a stalled canonical body after status %s', async (status) => {
+    vi.useFakeTimers();
+    process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'https://core.example.test';
+    process.env.VIVENTIUM_CALL_SESSION_SECRET = 'synthetic-secret';
+    let signal: AbortSignal | null = null;
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      signal = init.signal as AbortSignal;
+      return {
+        ok: status === 200,
+        status,
+        json: () =>
+          new Promise<unknown>((_resolve, reject) => {
+            signal!.addEventListener('abort', () => reject(new Error('body aborted')), {
+              once: true,
+            });
+          }),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { fetchAuthoritativeCallSession } = await import('@/lib/authoritative-call-session');
+    let outcome: unknown = null;
+    void fetchAuthoritativeCallSession('call-1', 'A'.repeat(43)).then(
+      (value) => {
+        outcome = value;
+      },
+      (error) => {
+        outcome = error;
+      }
+    );
+    await vi.advanceTimersByTimeAsync(5_001);
+
+    expect(outcome).toMatchObject({ code: 'gateway_down', status: 504, retryable: true });
+    expect(signal!.aborted).toBe(true);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(liveKitMocks.createDispatch).not.toHaveBeenCalled();
+    expect(liveKitMocks.toJwt).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('accepts the canonical body before its deadline and clears the timer', async () => {
+    vi.useFakeTimers();
+    process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'https://core.example.test';
+    process.env.VIVENTIUM_CALL_SESSION_SECRET = 'synthetic-secret';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: () => new Promise((resolve) => setTimeout(() => resolve(canonical), 25)),
+      }))
+    );
+    const { fetchAuthoritativeCallSession } = await import('@/lib/authoritative-call-session');
+    const result = fetchAuthoritativeCallSession('call-1', 'A'.repeat(43));
+    await vi.advanceTimersByTimeAsync(25);
+    await expect(result).resolves.toEqual(canonical);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('preserves a fully received authority rejection without dispatch or retry', async () => {
+    vi.useFakeTimers();
+    process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'https://core.example.test';
+    process.env.VIVENTIUM_CALL_SESSION_SECRET = 'synthetic-secret';
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 410,
+      json: async () => ({
+        code: 'auth_expired',
+        message: 'This call has ended.',
+        retryable: false,
+      }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { fetchAuthoritativeCallSession } = await import('@/lib/authoritative-call-session');
+    await expect(fetchAuthoritativeCallSession('call-1', 'A'.repeat(43))).rejects.toMatchObject({
+      code: 'auth_expired',
+      status: 410,
+      retryable: false,
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(liveKitMocks.createDispatch).not.toHaveBeenCalled();
+    expect(liveKitMocks.toJwt).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});

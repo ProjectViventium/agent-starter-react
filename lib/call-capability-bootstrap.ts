@@ -49,9 +49,9 @@ try{
    redirect:'error',
    signal:controller?controller.signal:undefined
   }).then(function(response){
-   if(timeout!==null&&typeof window.clearTimeout==='function')window.clearTimeout(timeout);
    return response.text().then(function(text){return {response:response,text:text};});
   }).then(function(result){
+   if(timeout!==null&&typeof window.clearTimeout==='function')window.clearTimeout(timeout);
    var payload={};
    try{payload=result.text?JSON.parse(result.text):{};}catch(_){}
    if(result.response.ok&&payload&&payload.version===1&&payload.callSessionId===i&&sc.test(payload.browserCapability||'')){

@@ -256,3 +256,86 @@ describe('exact completed speech Stop BFF carrier', () => {
     });
   });
 });
+
+describe('call task response body deadline', () => {
+  const configure = () => {
+    vi.useFakeTimers();
+    process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'https://librechat.example.com';
+    process.env.VIVENTIUM_CALL_SESSION_SECRET = 'synthetic-server-secret';
+    process.env.VIVENTIUM_CALL_PROXY_TIMEOUT_MS = '10';
+  };
+  const request = () =>
+    proxyCallTaskRequest(
+      '/api/viventium/voice/tasks?callSessionId=call-1',
+      'GET',
+      'call-1',
+      'A'.repeat(43)
+    );
+
+  it.each([200, 410])('bounds a stalled HTTP%s body after headers', async (status) => {
+    configure();
+    const observation: { signal?: AbortSignal } = {};
+    const fetchMock = vi.fn(async (_url: URL, init?: RequestInit) => {
+      observation.signal = init?.signal ?? undefined;
+      return {
+        status,
+        ok: status < 400,
+        json: () =>
+          new Promise<unknown>((_resolve, reject) => {
+            observation.signal?.addEventListener(
+              'abort',
+              () => {
+                const error = new Error('Aborted');
+                error.name = 'AbortError';
+                reject(error);
+              },
+              { once: true }
+            );
+          }),
+      } as Response;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    let settled = false;
+    const pending = request().then((response) => {
+      settled = true;
+      return response;
+    });
+    await vi.advanceTimersByTimeAsync(11);
+    expect(settled).toBe(true);
+    const response = await pending;
+    expect(response.status).toBe(504);
+    await expect(response.json()).resolves.toMatchObject({ code: 'gateway_down', retryable: true });
+    expect(observation.signal?.aborted).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    [200, JSON.stringify({ version: 1, events: [] }), { version: 1, events: [] }],
+    [200, 'not JSON', {}],
+    [
+      410,
+      JSON.stringify({ code: 'auth_expired', message: 'This call has ended.', retryable: false }),
+      { code: 'auth_expired', message: 'This call has ended.', retryable: false },
+    ],
+  ] as const)(
+    'keeps completed HTTP%s payloads and clears their deadline',
+    async (status, body, expected) => {
+      configure();
+      const observation: { signal?: AbortSignal } = {};
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (_url: URL, init?: RequestInit) => {
+          observation.signal = init?.signal ?? undefined;
+          return new Response(body, { status });
+        })
+      );
+      const response = await request();
+      expect(response.status).toBe(status);
+      await expect(response.json()).resolves.toEqual(expected);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(11);
+      expect(observation.signal?.aborted).toBe(false);
+    }
+  );
+});
