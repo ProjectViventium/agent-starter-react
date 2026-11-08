@@ -156,10 +156,13 @@ function renderActualSettings() {
     setRequestedVoiceRoute: changed,
   } as unknown as UseCallSessionVoiceSettingsResult;
   render(<AdvancedVoiceSettings settings={settings} />);
-  const summary = screen.getByText('Advanced voice settings', { selector: 'summary' });
+  const summary = screen.getByLabelText('Advanced voice settings', { selector: 'summary' });
   const panel = summary.parentElement as HTMLDetailsElement;
   fireEvent.click(summary);
   expect(panel.open).toBe(true);
+  const routeSummary = screen.getByText('Voice and assistant', { selector: 'summary' });
+  fireEvent.click(routeSummary);
+  expect((routeSummary.parentElement as HTMLDetailsElement).open).toBe(true);
   return { panel, summary, changed };
 }
 

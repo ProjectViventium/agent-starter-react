@@ -26,6 +26,7 @@ export interface ControlBarControls {
 
 export interface AgentControlBarProps extends UseInputControlsProps {
   appConfig: AppConfig;
+  startupPending?: boolean;
   controls?: ControlBarControls;
   isConnected?: boolean;
   onChatOpenChange?: (open: boolean) => void;
@@ -40,6 +41,7 @@ export interface AgentControlBarProps extends UseInputControlsProps {
  */
 export function AgentControlBar({
   appConfig,
+  startupPending = false,
   controls,
   saveUserChoices = true,
   callSessionId,
@@ -129,7 +131,7 @@ export function AgentControlBar({
               aria-label="Toggle microphone"
               source={Track.Source.Microphone}
               pressed={microphoneToggle.enabled}
-              disabled={microphoneToggle.pending}
+              disabled={startupPending || microphoneToggle.pending}
               audioTrackRef={micTrackRef}
               onPressedChange={microphoneToggle.toggle}
               onMediaDeviceError={handleMicrophoneDeviceSelectError}

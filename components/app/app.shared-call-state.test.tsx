@@ -4,9 +4,8 @@
  * VIVENTIUM END */
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { AppConfig } from '@/app-config';
-import { CallRequestError } from '@/lib/call-start';
 
 let App: typeof import('@/components/app/app').App;
 
@@ -32,11 +31,16 @@ const session = {
   start: state.start,
   end: state.end,
   room: {
+    options: { audioCaptureDefaults: { echoCancellation: true } },
     on: vi.fn(),
     off: vi.fn(),
     startAudio: state.startAudio,
     remoteParticipants: new Map(),
-    localParticipant: { setMicrophoneEnabled: state.setMicrophoneEnabled },
+    localParticipant: {
+      setMicrophoneEnabled: state.setMicrophoneEnabled,
+      createTracks: vi.fn().mockImplementation(async () => [{ stop: vi.fn() }]),
+      publishTrack: vi.fn(),
+    },
   },
 };
 vi.mock('@livekit/components-react', () => ({
@@ -131,6 +135,10 @@ function openCall(autoConnect = false) {
   return render(<App appConfig={appConfig} />);
 }
 beforeEach(async () => {
+  session.room.localParticipant.createTracks
+    .mockReset()
+    .mockImplementation(async () => [{ stop: vi.fn() }]);
+  session.room.localParticipant.publishTrack.mockReset();
   vi.resetModules();
   vi.stubGlobal('React', React);
   window.sessionStorage.clear();

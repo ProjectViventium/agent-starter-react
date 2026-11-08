@@ -11,7 +11,7 @@ export default async function Layout({ children }: LayoutProps) {
 
   return (
     <>
-      <header className="fixed top-0 left-0 z-50 hidden w-full flex-row justify-between p-6 md:flex">
+      <header className="fixed top-0 left-0 z-50 hidden w-full flex-row justify-between p-6 pr-32 md:flex">
         {/* VIVENTIUM START
          * Purpose: Update header branding links to Viventium.AI.
          * Details: docs/requirements_and_learnings/16_Branding_and_Assets.md#agent-starter-header

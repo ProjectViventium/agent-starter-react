@@ -7,7 +7,6 @@ import { RoomEvent } from 'livekit-client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { AppConfig } from '@/app-config';
-import { CallRequestError } from '@/lib/call-start';
 
 let App: typeof import('@/components/app/app').App;
 
@@ -33,6 +32,10 @@ const session = {
   start: state.start,
   end: state.end,
   room: {
+    get state(): string {
+      return session.connectionState;
+    },
+    options: { audioCaptureDefaults: { echoCancellation: true, deviceId: { ideal: 'default' } } },
     on: (event: string, listener: () => void) => {
       if (!roomListeners.has(event)) roomListeners.set(event, new Set());
       roomListeners.get(event)!.add(listener);
@@ -42,7 +45,11 @@ const session = {
     },
     startAudio: state.startAudio,
     remoteParticipants: new Map(),
-    localParticipant: { setMicrophoneEnabled: state.setMicrophoneEnabled },
+    localParticipant: {
+      setMicrophoneEnabled: state.setMicrophoneEnabled,
+      createTracks: vi.fn().mockImplementation(async () => [{ stop: vi.fn() }]),
+      publishTrack: vi.fn(),
+    },
   },
 };
 vi.mock('@livekit/components-react', () => ({
@@ -79,7 +86,11 @@ vi.mock('@/components/app/advanced-voice-settings', () => ({
   AdvancedVoiceSettings: () => (
     <output aria-label="Advisory settings">{state.settingsLoading ? 'loading' : 'ready'}</output>
   ),
-  ConnectedAdvancedVoiceSettings: () => null,
+  ConnectedAdvancedVoiceSettings: ({
+    deviceSound,
+  }: {
+    deviceSound: { selectMode: (mode: 'standard' | 'earpiece') => void };
+  }) => <button onClick={() => deviceSound.selectMode('standard')}>Choose speaker</button>,
 }));
 vi.mock('@/components/app/welcome-view', () => ({
   WelcomeView: ({
@@ -146,6 +157,14 @@ function openCall(autoConnect = false) {
   return render(<App appConfig={appConfig} />);
 }
 beforeEach(async () => {
+  session.room.options.audioCaptureDefaults = {
+    echoCancellation: true,
+    deviceId: { ideal: 'default' },
+  };
+  session.room.localParticipant.createTracks
+    .mockReset()
+    .mockImplementation(async () => [{ stop: vi.fn() }]);
+  session.room.localParticipant.publishTrack.mockReset();
   vi.resetModules();
   vi.stubGlobal('React', React);
   window.sessionStorage.clear();
@@ -194,6 +213,134 @@ beforeEach(async () => {
 });
 afterEach(() => vi.unstubAllGlobals());
 describe('advisory settings do not gate authoritative call start', () => {
+  it('applies a saved earpiece choice before either capture and verifies the effective track', async () => {
+    vi.stubGlobal('localStorage', { getItem: () => 'earpiece', setItem: vi.fn() });
+    const track = {
+      stop: vi.fn(),
+      mediaStreamTrack: { getSettings: () => ({ echoCancellation: false }) },
+    };
+    session.room.localParticipant.createTracks.mockImplementation(async () => {
+      expect(session.room.options.audioCaptureDefaults.echoCancellation).toBe(false);
+      return [track];
+    });
+    state.setMicrophoneEnabled.mockImplementation(async (enabled) => {
+      if (enabled) expect(session.room.options.audioCaptureDefaults.echoCancellation).toBe(false);
+      return { track };
+    });
+    openCall(true);
+    await waitFor(() => expect(state.startAudio).toHaveBeenCalled());
+    expect(state.start).toHaveBeenCalledTimes(1);
+    expect(track.stop).toHaveBeenCalledTimes(1);
+  });
+  it('freezes one call mode and restores speaker capture for a later Start on the same Room', async () => {
+    vi.stubGlobal('localStorage', { getItem: () => 'earpiece', setItem: vi.fn() });
+    const capturedModes: boolean[] = [];
+    session.room.localParticipant.createTracks.mockImplementation(async () => {
+      const echoCancellation = session.room.options.audioCaptureDefaults.echoCancellation;
+      capturedModes.push(echoCancellation);
+      return [{ stop: vi.fn(), mediaStreamTrack: { getSettings: () => ({ echoCancellation }) } }];
+    });
+    state.setMicrophoneEnabled.mockImplementation(async () => ({
+      track: {
+        mediaStreamTrack: {
+          getSettings: () => ({
+            echoCancellation: session.room.options.audioCaptureDefaults.echoCancellation,
+          }),
+        },
+      },
+    }));
+    const { rerender } = openCall(true);
+    const originalRoom = session.room;
+    await waitFor(() => expect(state.startAudio).toHaveBeenCalledTimes(1));
+    expect(capturedModes).toEqual([false]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Choose speaker' }));
+    expect(session.room.options.audioCaptureDefaults.echoCancellation).toBe(false);
+    expect(state.start).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      roomListeners.get(RoomEvent.Disconnected)?.forEach((listener) => listener());
+      rerender(<App appConfig={appConfig} />);
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    await waitFor(() => expect(state.startAudio).toHaveBeenCalledTimes(2));
+    expect(session.room).toBe(originalRoom);
+    expect(state.start).toHaveBeenCalledTimes(2);
+    expect(capturedModes).toEqual([false, true]);
+    expect(session.room.options.audioCaptureDefaults.echoCancellation).toBe(true);
+  });
+  it.each([false, true])(
+    'uses settled Room state after failed Start when connected=%s and no disconnect event fires',
+    async (connected) => {
+      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      vi.stubGlobal('localStorage', { getItem: () => 'earpiece', setItem: vi.fn() });
+      const capturedModes: boolean[] = [];
+      session.room.localParticipant.createTracks.mockImplementation(async () => {
+        const echoCancellation = session.room.options.audioCaptureDefaults.echoCancellation;
+        capturedModes.push(echoCancellation);
+        return [{ stop: vi.fn(), mediaStreamTrack: { getSettings: () => ({ echoCancellation }) } }];
+      });
+      state.setMicrophoneEnabled.mockImplementation(async () => ({
+        track: {
+          mediaStreamTrack: {
+            getSettings: () => ({
+              echoCancellation: session.room.options.audioCaptureDefaults.echoCancellation,
+            }),
+          },
+        },
+      }));
+      state.start.mockImplementationOnce(async () => {
+        if (connected) {
+          session.isConnected = true;
+          session.connectionState = 'connected';
+        }
+        throw new Error('Synthetic session start failed without a room event');
+      });
+      openCall(true);
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Connect' })).toBeEnabled());
+      expect(state.start).toHaveBeenCalledTimes(1);
+      expect(capturedModes).toEqual([false]);
+      fireEvent.click(screen.getByRole('button', { name: 'Choose speaker' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+      await waitFor(() => expect(state.startAudio).toHaveBeenCalledTimes(1));
+      expect(state.start).toHaveBeenCalledTimes(2);
+      expect(capturedModes).toEqual([false, connected ? false : true]);
+    }
+  );
+  it('stops an unsupported earpiece capture before starting the call', async () => {
+    vi.stubGlobal('localStorage', { getItem: () => 'earpiece', setItem: vi.fn() });
+    const track = {
+      stop: vi.fn(),
+      mediaStreamTrack: { getSettings: () => ({ echoCancellation: true }) },
+    };
+    session.room.localParticipant.createTracks.mockResolvedValue([track]);
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    openCall(true);
+    await waitFor(() => expect(track.stop).toHaveBeenCalled());
+    expect(state.start).not.toHaveBeenCalled();
+    expect(state.setMicrophoneEnabled).not.toHaveBeenCalledWith(true);
+    errorLog.mockRestore();
+  });
+  it('ends the session and disables the microphone if publication cannot confirm earpiece mode', async () => {
+    vi.stubGlobal('localStorage', { getItem: () => 'earpiece', setItem: vi.fn() });
+    const captured = {
+      stop: vi.fn(),
+      mediaStreamTrack: { getSettings: () => ({ echoCancellation: false }) },
+    };
+    session.room.localParticipant.createTracks.mockResolvedValue([captured]);
+    state.setMicrophoneEnabled.mockImplementation(async (enabled) =>
+      enabled
+        ? { track: { mediaStreamTrack: { getSettings: () => ({ echoCancellation: true }) } } }
+        : undefined
+    );
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    openCall(true);
+    await waitFor(() => expect(state.end).toHaveBeenCalled());
+    expect(state.setMicrophoneEnabled).toHaveBeenCalledWith(false);
+    expect(captured.stop).toHaveBeenCalled();
+    expect(state.startAudio).not.toHaveBeenCalled();
+    errorLog.mockRestore();
+  });
   it('accepts manual Start while the settings read is still pending', async () => {
     state.settingsLoading = true;
     state.emptyRoute = true;
@@ -467,21 +614,18 @@ it.each([false, true])('keeps cold-start reclaim truthful when terminal=%s', asy
 });
 /* VIVENTIUM END */
 
-it('does not automatically reclaim dispatch while a browser permission prompt remains pending', async () => {
+it('does not dispatch or reclaim while a browser permission prompt remains pending', async () => {
   vi.useFakeTimers();
   let grant!: () => void;
   const pending = new Promise<void>((resolve) => {
     grant = resolve;
   });
-  state.setMicrophoneEnabled.mockImplementation((enabled: boolean) =>
-    enabled ? pending : Promise.resolve()
-  );
+  session.room.localParticipant.createTracks.mockImplementationOnce(async () => {
+    await pending;
+    return [{ stop: vi.fn() }];
+  });
   vi.stubGlobal('navigator', {
     permissions: { query: vi.fn().mockResolvedValue({ state: 'prompt' }) },
-  });
-  state.start.mockImplementation(async () => {
-    session.isConnected = true;
-    session.connectionState = 'connected';
   });
   try {
     await act(async () => {
@@ -490,10 +634,10 @@ it('does not automatically reclaim dispatch while a browser permission prompt re
     await act(async () => {
       await vi.advanceTimersByTimeAsync(30_000);
     });
-    expect(state.start).toHaveBeenCalledOnce();
+    expect(state.start).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: 'Connect' })).toBeDisabled();
-    expect(vi.mocked(fetch)).toHaveBeenCalledOnce();
-    expect(state.setMicrophoneEnabled).not.toHaveBeenCalledWith(false);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    expect(state.setMicrophoneEnabled).not.toHaveBeenCalled();
   } finally {
     await act(async () => {
       grant();
@@ -550,3 +694,25 @@ it('cancels pending capture on real unmount and neutralizes a late browser grant
   expect(vi.mocked(fetch)).toHaveBeenCalledOnce();
 });
 /* VIVENTIUM END */
+
+it('ends a pending pre-connect capture when the canonical call ends elsewhere', async () => {
+  let grant!: (tracks: { stop: ReturnType<typeof vi.fn> }[]) => void;
+  const track = { stop: vi.fn() };
+  session.room.localParticipant.createTracks.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        grant = resolve;
+      })
+  );
+  const { rerender } = openCall(true);
+  await waitFor(() => expect(session.room.localParticipant.createTracks).toHaveBeenCalledOnce());
+  state.knownEnded = true;
+  rerender(<App appConfig={appConfig} />);
+  await waitFor(() => expect(screen.getByLabelText('Call ended')).toHaveTextContent('true'));
+  await act(async () => {
+    grant([track]);
+  });
+  await waitFor(() => expect(track.stop).toHaveBeenCalled());
+  expect(state.start).not.toHaveBeenCalled();
+  expect(session.room.localParticipant.publishTrack).not.toHaveBeenCalled();
+});

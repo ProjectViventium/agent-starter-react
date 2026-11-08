@@ -147,3 +147,28 @@ or a separate voice-only orchestration framework. Text, Telegram, and voice use 
 request ownership. The focused cases in `lib/voice-events.test.ts` and
 `components/app/call-activity.test.tsx` retain the parser and presentation boundaries. Passing
 these cases alone does not prove always-on voice reliability or a response latency target.
+
+## Viventium call startup and device sound
+
+The Voice menu offers a browser-local sound preference before a call starts. Speaker keeps normal
+echo processing. Earpiece / headphones requests echo processing off and requires the browser to
+confirm the effective capture setting. This preference does not guarantee a physical output route.
+The first Start captures the choice for that call; changing the preference applies to the next call
+and does not replace an active microphone or interrupt speech.
+
+For managed calls, microphone permission and capture finish before dispatch. The LiveKit SDK owns
+microphone publication after connection. Leaving, denial, or an authoritative ended state cancels
+pending capture; recovery shares the existing in-flight Start rather than publishing another track.
+
+When configured, `VIVENTIUM_PUBLIC_NETWORK_STATE_FILE` is read for each connection request. A LAN
+route is accepted only when its published readiness and address match a current network interface.
+Stale or unreadable managed state fails explicitly instead of reusing startup addresses. Existing
+public and loopback route selection remains separate.
+
+`/phone-sound-check.html` is a manual browser diagnostic. It plays a quiet tone, requests microphone
+access only after an explicit test action, and records or uploads nothing. A clear tone does not
+establish clear speech, speaker routing, or two-way call quality. Generated Next build caches and
+machine-specific type-generation paths must stay outside versioned source configuration.
+
+The device-sound, call-persistence, start-advisory, connection-authority, and nested-menu tests cover
+these boundaries with synthetic data. Real phone audio still requires the audible device path.

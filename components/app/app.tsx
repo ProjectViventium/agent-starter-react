@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ConnectionState,
+  type LocalTrack,
   RoomEvent,
   TokenSource,
   type TokenSourceConfigurable,
@@ -32,6 +33,11 @@ import {
 // VIVENTIUM END
 import { useConnectionRecovery } from '@/hooks/useConnectionRecovery';
 import { useDebugMode } from '@/hooks/useDebug';
+import {
+  type DeviceSoundMode,
+  type DeviceSoundSettings,
+  useDeviceSoundMode,
+} from '@/hooks/useDeviceSoundMode';
 import { buildFallbackVoiceRoute } from '@/hooks/useVoiceRoute';
 import { useWakeLock } from '@/hooks/useWakeLock';
 import {
@@ -46,6 +52,7 @@ import {
   readCallDeepLink,
 } from '@/lib/call-start';
 import { publishVoiceCallState } from '@/lib/call-state';
+import { deviceSoundCaptureOptions, verifyDeviceSoundCapture } from '@/lib/device-sound-mode';
 import {
   enableCallMicrophone,
   queryMicrophonePermissionState,
@@ -440,6 +447,7 @@ type AppSessionProps = {
   appConfig: AppConfig;
   // VIVENTIUM START: Preserve the same per-call settings object after auto-connect.
   voiceSettings: UseCallSessionVoiceSettingsResult;
+  deviceSound: DeviceSoundSettings;
   callSessionState: UseCallSessionStateResult;
   onKeepAliveEnabledChange: (enabled: boolean) => void;
   // VIVENTIUM END
@@ -459,6 +467,7 @@ function AppSession({
   appConfig,
   // VIVENTIUM START: Render the exact preflight settings inside SessionProvider.
   voiceSettings,
+  deviceSound,
   callSessionState,
   onKeepAliveEnabledChange,
   // VIVENTIUM END
@@ -469,6 +478,8 @@ function AppSession({
   const [audioRecoveryRequired, setAudioRecoveryRequired] = useState(false);
   const [startError, setStartError] = useState<CallIssue | null>(null);
   const [hasEnded, setHasEnded] = useState(false);
+  const activeSoundModeRef = useRef<DeviceSoundMode | null>(null);
+  const [activeSoundMode, setActiveSoundMode] = useState<DeviceSoundMode | null>(null);
   const startPromiseRef = useRef<Promise<boolean> | null>(null);
   const startAttemptRef = useRef<AbortController | null>(null);
   const microphoneAttemptRef = useRef<AbortController | null>(null);
@@ -498,6 +509,8 @@ function AppSession({
   );
   const session = useSession(tokenSource, sessionOptions);
   const terminateStartup = useCallback(() => {
+    activeSoundModeRef.current = null;
+    setActiveSoundMode(null);
     terminalDisconnectRef.current = true;
     startAttemptRef.current?.abort(
       new CallRequestError(
@@ -542,10 +555,17 @@ function AppSession({
       return;
     }
     setHasEnded(true);
+    terminateStartup();
     if (session.connectionState !== ConnectionState.Disconnected) {
       void disconnectDurablyEndedCallSession(expectedCallSessionId, () => session.end());
     }
-  }, [callSessionState.authoritativeStatus, expectedCallSessionId, hasEnded, session]);
+  }, [
+    callSessionState.authoritativeStatus,
+    expectedCallSessionId,
+    hasEnded,
+    session,
+    terminateStartup,
+  ]);
 
   useEffect(() => {
     const transition = callSessionState.lastModeTransition;
@@ -678,10 +698,9 @@ function AppSession({
   ]);
 
   /* === VIVENTIUM START ===
-   * Feature: Explicit-dispatch call startup hardening.
-   * Purpose: Avoid LiveKit's 15s pre-connect mic publish timeout while /api/connection-details
-   * performs dispatch work. Publisher-dispatch agents still join as soon as the connected room
-   * publishes the microphone track.
+   * Capture before ICE so browsers can offer a reachable LAN candidate. Publish only after
+   * connection, avoiding LiveKit's pre-connect publication timeout. Permission prompts finish
+   * before dispatch so they do not consume the worker's owner-admission window.
    * === VIVENTIUM END === */
   const shouldDeferMicrophoneUntilConnected = Boolean(expectedCallSessionId || appConfig.agentName);
   const startRoomAudio = useCallback(async () => {
@@ -709,16 +728,49 @@ function AppSession({
     const attempt = new AbortController();
     startAttemptRef.current = attempt;
     terminalDisconnectRef.current = false;
+    let capturedTracks: LocalTrack[] = [];
+    const stopCapturedTracks = async () => {
+      capturedTracks.forEach((track) => track.stop());
+      capturedTracks = [];
+    };
     try {
-      if (expectedCallSessionId) {
-        await fetchCallConnectionDetailsForStart(tokenSource, tokenOptions ?? {}, retry);
-      }
+      // Freeze the choice for this call, including reconnect and mute/unmute. A preference
+      // change never replaces a live microphone or interrupts an assistant reply.
+      const soundMode = activeSoundModeRef.current ?? deviceSound.mode;
+      activeSoundModeRef.current = soundMode;
+      setActiveSoundMode(soundMode);
+      session.room.options.audioCaptureDefaults = deviceSoundCaptureOptions(
+        session.room.options.audioCaptureDefaults ?? {},
+        soundMode
+      );
       if (!shouldDeferMicrophoneUntilConnected) {
         await session.start({ signal: attempt.signal });
         await startRoomAudio();
         return;
       }
 
+      const microphoneEnabled = readCallMicrophoneEnabled(expectedCallSessionId) !== false;
+      if (microphoneEnabled) {
+        setIsMicrophoneStartupPending(true);
+        microphoneAttemptRef.current = attempt;
+        await enableCallMicrophone({
+          permissionState: await queryMicrophonePermissionState(),
+          signal: attempt.signal,
+          enable: async () => {
+            capturedTracks = await session.room.localParticipant.createTracks({
+              audio: true,
+              video: false,
+            });
+            verifyDeviceSoundCapture(soundMode, capturedTracks[0]);
+          },
+          disable: stopCapturedTracks,
+          grantedTimeoutMs: MICROPHONE_START_TIMEOUT_MS,
+        });
+      }
+      setIsMicrophoneStartupPending(false);
+      if (expectedCallSessionId) {
+        await fetchCallConnectionDetailsForStart(tokenSource, tokenOptions ?? {}, retry);
+      }
       await session.start({
         signal: attempt.signal,
         tracks: {
@@ -728,28 +780,35 @@ function AppSession({
         },
       });
 
-      if (readCallMicrophoneEnabled(expectedCallSessionId) === false) {
+      if (!microphoneEnabled) {
         await startRoomAudio();
         return;
       }
 
       try {
         setIsMicrophoneStartupPending(true);
-        const permissionState = await queryMicrophonePermissionState();
-        microphoneAttemptRef.current = attempt;
+        const disableMicrophone = () => {
+          const current = microphoneAttemptRef.current;
+          // A newer retry may own the SDK's single-flight microphone publication.
+          if (current !== attempt && current && !current.signal.aborted) return Promise.resolve();
+          return session.room.localParticipant.setMicrophoneEnabled(false);
+        };
         await enableCallMicrophone({
-          permissionState,
+          permissionState: 'granted',
           signal: attempt.signal,
-          enable: () => session.room.localParticipant.setMicrophoneEnabled(true),
-          disable: () => {
-            const current = microphoneAttemptRef.current;
-            // SDK capture is single-flight. A newer explicit Retry may adopt its pending
-            // publication; obsolete cleanup must not mute that newer microphone owner.
-            if (current !== attempt && current && !current.signal.aborted) {
-              return Promise.resolve();
+          enable: async () => {
+            await stopCapturedTracks();
+            // Keep publication with the SDK's source-wide single-flight owner. Raw publishTrack
+            // can race mute/recovery and leave a second microphone live.
+            const publication = await session.room.localParticipant.setMicrophoneEnabled(true);
+            try {
+              verifyDeviceSoundCapture(soundMode, publication?.track);
+            } catch (error) {
+              await disableMicrophone();
+              throw error;
             }
-            return session.room.localParticipant.setMicrophoneEnabled(false);
           },
+          disable: disableMicrophone,
           grantedTimeoutMs: MICROPHONE_START_TIMEOUT_MS,
         });
         await startRoomAudio();
@@ -766,7 +825,17 @@ function AppSession({
       }
     } catch (error) {
       attempt.abort(error);
+      await stopCapturedTracks();
+      if (
+        startAttemptRef.current === attempt &&
+        session.room.state === ConnectionState.Disconnected
+      ) {
+        activeSoundModeRef.current = null;
+        setActiveSoundMode(null);
+      }
       throw error;
+    } finally {
+      setIsMicrophoneStartupPending(false);
     }
   }, [
     session,
@@ -777,6 +846,7 @@ function AppSession({
     callSessionState.authoritativeStatus,
     tokenSource,
     tokenOptions,
+    deviceSound.mode,
   ]);
 
   /* === VIVENTIUM START ===
@@ -784,12 +854,6 @@ function AppSession({
    * Purpose: If the wake lock fails (e.g., user manually locks phone), attempt
    * to restore the call when the page becomes visible again.
    * === VIVENTIUM END === */
-  useConnectionRecovery({
-    connectionState: session.connectionState,
-    isConnected: session.isConnected,
-    start: startSession,
-  });
-
   const startCall = useCallback(async () => {
     if (startPromiseRef.current) {
       return startPromiseRef.current;
@@ -813,6 +877,15 @@ function AppSession({
     startPromiseRef.current = startPromise;
     return startPromise;
   }, [startSession]);
+
+  const recoverCall = useCallback(async () => {
+    if (!(await startCall())) throw new Error('Viventium call recovery failed.');
+  }, [startCall]);
+  useConnectionRecovery({
+    connectionState: session.connectionState,
+    isConnected: session.isConnected,
+    start: recoverCall,
+  });
 
   /* === VIVENTIUM START ===
    * Feature: LibreChat deep-link auto-connect
@@ -886,6 +959,7 @@ function AppSession({
         <ViewController
           appConfig={appConfig}
           canStartCall={effectiveCanStartCall}
+          startupPending={isStartInProgress}
           startHint={effectiveStartHint ?? undefined}
           startButtonText={effectiveStartButtonText}
           onStartCall={() => {
@@ -918,6 +992,8 @@ function AppSession({
           appConfig={appConfig}
           settings={voiceSettings}
           ended={hasEnded}
+          deviceSound={deviceSound}
+          activeSoundMode={activeSoundMode}
         />
       )}
       {/* VIVENTIUM END */}
@@ -943,6 +1019,7 @@ export function App({ appConfig }: AppProps) {
   const [remoteCallBlockedReason, setRemoteCallBlockedReason] = useState<string | null>(null);
   const fallbackVoiceRoute = useMemo(() => buildFallbackVoiceRoute(appConfig), [appConfig]);
   const voiceSettings = useCallSessionVoiceSettings(expectedCallSessionId, fallbackVoiceRoute);
+  const deviceSound = useDeviceSoundMode();
   /* VIVENTIUM START: One canonical call-state owner serves both manual setup and the live call.
    * State loads beside advisory settings. It never adds a Start wait or native session prewarm.
    * The live session still enables keepalive only while connecting or connected.
@@ -1001,7 +1078,7 @@ export function App({ appConfig }: AppProps) {
     setDeepLinkReady(true);
   }, [clientReady]);
 
-  if (!clientReady || !deepLinkReady) {
+  if (!clientReady || !deepLinkReady || !deviceSound.ready) {
     return null;
   }
 
@@ -1068,9 +1145,12 @@ export function App({ appConfig }: AppProps) {
             mode={callSessionState.mode}
           />
           {/* VIVENTIUM START: Allow route selection before a manually started call. */}
-          {expectedCallSessionId && (
-            <AdvancedVoiceSettings settings={voiceSettings} readOnly={callEnded} />
-          )}
+          <AdvancedVoiceSettings
+            settings={voiceSettings}
+            readOnly={callEnded || !expectedCallSessionId}
+            hasCall={Boolean(expectedCallSessionId)}
+            deviceSound={deviceSound}
+          />
           {/* VIVENTIUM END */}
         </main>
         <Toaster />
@@ -1094,6 +1174,7 @@ export function App({ appConfig }: AppProps) {
         preflightIssue={preflightIssue}
         appConfig={appConfig}
         voiceSettings={voiceSettings}
+        deviceSound={deviceSound}
         callSessionState={callSessionState}
         onKeepAliveEnabledChange={setKeepAliveEnabled}
       />
