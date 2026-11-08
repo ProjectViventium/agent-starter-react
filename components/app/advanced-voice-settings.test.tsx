@@ -5,9 +5,12 @@
 import React from 'react';
 import { ConnectionState } from 'livekit-client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import type { AppConfig } from '@/app-config';
-import { ConnectedAdvancedVoiceSettings } from '@/components/app/advanced-voice-settings';
+import {
+  AdvancedVoiceSettings,
+  ConnectedAdvancedVoiceSettings,
+} from '@/components/app/advanced-voice-settings';
 import type { UseCallSessionVoiceSettingsResult } from '@/hooks/useCallSessionVoiceSettings';
 import type { VoiceRouteMetadata } from '@/hooks/useVoiceRoute';
 
@@ -85,6 +88,43 @@ afterEach(() => {
 });
 
 describe('ConnectedAdvancedVoiceSettings', () => {
+  it('shows device sound without unavailable call controls before a call exists', () => {
+    render(
+      <AdvancedVoiceSettings
+        settings={{ ...settings, selectionVoiceRoute: null }}
+        hasCall={false}
+        deviceSound={{ mode: 'standard', ready: true, notice: null, selectMode: vi.fn() }}
+      />
+    );
+    expect(screen.getByRole('button', { name: 'Speaker', hidden: true })).toBeInTheDocument();
+    expect(screen.queryByText('Voice and assistant')).not.toBeInTheDocument();
+    expect(screen.queryByText('Voice settings are unavailable.')).not.toBeInTheDocument();
+  });
+  it('saves sound for the next call without changing a connected call or opening its microphone', () => {
+    const selectMode = vi.fn();
+    const { rerender } = render(
+      <ConnectedAdvancedVoiceSettings
+        appConfig={appConfig}
+        settings={settings}
+        ended={false}
+        deviceSound={{ mode: 'standard', ready: true, notice: null, selectMode }}
+        activeSoundMode="standard"
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Earpiece / headphones', hidden: true }));
+    expect(selectMode).toHaveBeenCalledWith('earpiece');
+    rerender(
+      <ConnectedAdvancedVoiceSettings
+        appConfig={appConfig}
+        settings={settings}
+        ended={false}
+        deviceSound={{ mode: 'earpiece', ready: true, notice: null, selectMode }}
+        activeSoundMode="standard"
+      />
+    );
+    expect(screen.getByText(/Saved for your next call/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Voice route edit state')).toHaveTextContent('read-only:true');
+  });
   it('shows the configured effort beside the assistant and backup model', () => {
     const primary = {
       provider: 'glasshive-harness',
@@ -170,7 +210,7 @@ describe('ConnectedAdvancedVoiceSettings', () => {
     const { rerender } = render(
       <ConnectedAdvancedVoiceSettings appConfig={appConfig} settings={settings} ended={false} />
     );
-    expect(screen.getByText('Advanced voice settings')).toBeInTheDocument();
+    expect(screen.getAllByLabelText('Advanced voice settings').length).toBeGreaterThan(0);
     expect(screen.getByLabelText('Voice route edit state')).toHaveTextContent('read-only:true');
 
     livekitState.connectionState = ConnectionState.Disconnected;

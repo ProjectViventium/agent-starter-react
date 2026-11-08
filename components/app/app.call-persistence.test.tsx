@@ -30,11 +30,16 @@ const session = {
   start: state.start,
   end: state.end,
   room: {
+    options: { audioCaptureDefaults: { echoCancellation: true } },
     on: vi.fn(),
     off: vi.fn(),
     startAudio: state.startAudio,
     remoteParticipants: new Map(),
-    localParticipant: { setMicrophoneEnabled: state.setMicrophoneEnabled },
+    localParticipant: {
+      setMicrophoneEnabled: state.setMicrophoneEnabled,
+      createTracks: vi.fn().mockImplementation(async () => [{ stop: vi.fn() }]),
+      publishTrack: vi.fn(),
+    },
   },
 };
 
@@ -157,6 +162,10 @@ beforeEach(async () => {
     await state.fetchConnectionDetails?.();
     await state.roomConnect();
   });
+  session.room.localParticipant.createTracks
+    .mockReset()
+    .mockImplementation(async () => [{ stop: vi.fn() }]);
+  session.room.localParticipant.publishTrack.mockReset();
   state.roomConnect.mockClear();
   state.end.mockClear();
   state.startAudio.mockClear();
@@ -208,6 +217,67 @@ beforeEach(async () => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('call microphone persistence and terminal bootstrap', () => {
+  it('finishes ICE capture before dispatch and lets only the SDK publish after connection', async () => {
+    let grant!: (tracks: { stop: ReturnType<typeof vi.fn> }[]) => void;
+    const track = { stop: vi.fn() };
+    session.room.localParticipant.createTracks.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          grant = resolve;
+        })
+    );
+    openCall();
+    await waitFor(() => expect(session.room.localParticipant.createTracks).toHaveBeenCalledOnce());
+    expect(state.start).not.toHaveBeenCalled();
+    expect(vi.mocked(fetch).mock.calls.some(([url]) => url === '/api/connection-details')).toBe(
+      false
+    );
+    await act(async () => {
+      grant([track]);
+    });
+    await waitFor(() => expect(state.setMicrophoneEnabled).toHaveBeenCalledWith(true));
+    expect(state.roomConnect.mock.invocationCallOrder[0]).toBeLessThan(
+      state.setMicrophoneEnabled.mock.invocationCallOrder[0]
+    );
+    expect(track.stop).toHaveBeenCalledOnce();
+    expect(session.room.localParticipant.publishTrack).not.toHaveBeenCalled();
+  });
+
+  it('reports capture denial before creating a dispatched room', async () => {
+    session.room.localParticipant.createTracks.mockRejectedValueOnce(
+      new DOMException('Permission denied', 'NotAllowedError')
+    );
+    openCall();
+    await waitFor(() => expect(session.room.localParticipant.createTracks).toHaveBeenCalledOnce());
+    await waitFor(() =>
+      expect(screen.getByLabelText('Call issue')).toHaveTextContent('mic_denied')
+    );
+    expect(state.start).not.toHaveBeenCalled();
+    expect(vi.mocked(fetch).mock.calls.some(([url]) => url === '/api/connection-details')).toBe(
+      false
+    );
+  });
+
+  it('stops a late capture after leaving without dispatching or publishing it', async () => {
+    let grant!: (tracks: { stop: ReturnType<typeof vi.fn> }[]) => void;
+    const track = { stop: vi.fn() };
+    session.room.localParticipant.createTracks.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          grant = resolve;
+        })
+    );
+    const view = openCall();
+    await waitFor(() => expect(session.room.localParticipant.createTracks).toHaveBeenCalledOnce());
+    view.unmount();
+    await act(async () => {
+      grant([track]);
+    });
+    await waitFor(() => expect(track.stop).toHaveBeenCalled());
+    expect(state.start).not.toHaveBeenCalled();
+    expect(session.room.localParticipant.publishTrack).not.toHaveBeenCalled();
+  });
+
   it('retains explicit mute after reload of the same call', async () => {
     const first = openCall();
     await waitFor(() => expect(state.setMicrophoneEnabled).toHaveBeenCalledWith(true));
@@ -423,4 +493,27 @@ describe('canonical admission before native room startup', () => {
     expect(state.startAudio).not.toHaveBeenCalled();
     expect(errorLog.mock.calls.length).toBeLessThanOrEqual(1);
   });
+});
+
+it('shares an in-flight start with concurrent recovery without another capture or publication', async () => {
+  let grant!: (tracks: { stop: ReturnType<typeof vi.fn> }[]) => void;
+  session.room.localParticipant.createTracks.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        grant = resolve;
+      })
+  );
+  openCall();
+  await waitFor(() => expect(session.room.localParticipant.createTracks).toHaveBeenCalledOnce());
+  const firstRecovery = state.recover?.();
+  const secondRecovery = state.recover?.();
+  await act(async () => {
+    grant([{ stop: vi.fn() }]);
+    await firstRecovery;
+    await secondRecovery;
+  });
+  expect(session.room.localParticipant.createTracks).toHaveBeenCalledOnce();
+  expect(state.start).toHaveBeenCalledOnce();
+  expect(state.setMicrophoneEnabled).toHaveBeenCalledOnce();
+  expect(session.room.localParticipant.publishTrack).not.toHaveBeenCalled();
 });

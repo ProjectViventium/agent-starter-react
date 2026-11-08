@@ -24,6 +24,7 @@ function resolveAllowedDevOrigins(): string[] {
     process.env.VIVENTIUM_PUBLIC_CLIENT_URL,
     process.env.VIVENTIUM_PUBLIC_SERVER_URL,
     process.env.VIVENTIUM_PUBLIC_PLAYGROUND_URL,
+    process.env.VIVENTIUM_LAN_PLAYGROUND_URL,
   ];
   const allowed = new Set<string>();
 

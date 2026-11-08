@@ -108,7 +108,11 @@ beforeEach(async () => {
       off: vi.fn(),
       startAudio: state.startAudio,
       remoteParticipants: new Map(),
-      localParticipant: { setMicrophoneEnabled: state.setMicrophoneEnabled },
+      localParticipant: {
+        setMicrophoneEnabled: state.setMicrophoneEnabled,
+        createTracks: vi.fn().mockImplementation(async () => [{ stop: vi.fn() }]),
+        publishTrack: vi.fn(),
+      },
     },
   });
   state.start.mockReset();

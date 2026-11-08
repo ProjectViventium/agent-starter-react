@@ -81,6 +81,7 @@ export function Fade({ top = false, bottom = false, className }: FadeProps) {
 
 interface SessionViewProps {
   appConfig: AppConfig;
+  startupPending?: boolean;
   callSessionId: string | null;
   conversationId?: string | null;
   onLinkedChatHrefChange?: (href: string | null) => void;
@@ -100,6 +101,7 @@ interface SessionViewProps {
 
 export const SessionView = ({
   appConfig,
+  startupPending = false,
   callSessionId,
   conversationId = null,
   mode = 'call',
@@ -330,6 +332,7 @@ export const SessionView = ({
           <Fade bottom className="absolute inset-x-0 top-0 h-4 -translate-y-full" />
           <AgentControlBar
             appConfig={appConfig}
+            startupPending={startupPending}
             callSessionId={callSessionId}
             controls={controls}
             isConnected={session.isConnected}

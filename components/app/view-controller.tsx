@@ -41,6 +41,7 @@ const VIEW_MOTION_PROPS = {
 
 interface ViewControllerProps {
   appConfig: AppConfig;
+  startupPending?: boolean;
   canStartCall: boolean;
   startHint?: string;
   startButtonText?: string;
@@ -64,6 +65,7 @@ interface ViewControllerProps {
 
 export function ViewController({
   appConfig,
+  startupPending = false,
   canStartCall,
   startHint,
   startButtonText,
@@ -138,6 +140,7 @@ export function ViewController({
             key="session-view"
             {...viewMotionProps}
             appConfig={appConfig}
+            startupPending={startupPending}
             callSessionId={callSessionId}
             conversationId={conversationId}
             onLinkedChatHrefChange={onLinkedChatHrefChange}

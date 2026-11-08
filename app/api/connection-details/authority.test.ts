@@ -1,5 +1,25 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { networkInterfaces, tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+// A synthetic interface keeps network readiness tests independent of the host machine.
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  const networkInterfaces = () => ({
+    synthetic: [
+      {
+        address: '192.168.56.20',
+        family: 'IPv4',
+        internal: false,
+        netmask: '255.255.255.0',
+        cidr: '192.168.56.20/24',
+        mac: '00:00:00:00:00:00',
+      },
+    ],
+  });
+  return { ...actual, default: { ...actual, networkInterfaces }, networkInterfaces };
+});
 const liveKitMocks = vi.hoisted(() => ({
   createDispatch: vi.fn().mockResolvedValue({
     id: 'dispatch-ready',
@@ -1403,3 +1423,220 @@ describe('canonical call response-body deadline', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+describe('signaling configuration failures', () => {
+  it('does not retry when no signaling URL is configured', async () => {
+    vi.stubEnv('VIVENTIUM_LIBRECHAT_ORIGIN', 'https://librechat.example.com');
+    vi.stubEnv('VIVENTIUM_CALL_SESSION_SECRET', 'synthetic-secret');
+    for (const name of [
+      'LIVEKIT_URL',
+      'NEXT_PUBLIC_LIVEKIT_URL',
+      'VIVENTIUM_PUBLIC_NETWORK_STATE_FILE',
+      'VIVENTIUM_PUBLIC_LIVEKIT_URL',
+      'VIVENTIUM_LAN_LIVEKIT_URL',
+    ])
+      vi.stubEnv(name, undefined);
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const { POST } = await import('@/app/api/connection-details/route');
+      const response = await POST(
+        new Request('https://playground.example.test/api/connection-details', {
+          method: 'POST',
+          body: '{}',
+        })
+      );
+      expect(response.status).toBe(503);
+      await expect(response.json()).resolves.toMatchObject({
+        code: 'gateway_down',
+        retryable: false,
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(liveKitMocks.createDispatch).not.toHaveBeenCalled();
+      expect(liveKitMocks.toJwt).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+// VIVENTIUM START: LAN signaling must stay on the selected LAN edge, without changing other callers.
+describe('configured browser network', () => {
+  it('uses a changed managed network without restarting and refuses an unready or old edge', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'viv-network-'));
+    const file = join(directory, 'network.json');
+    const assignedIp = Object.values(networkInterfaces())
+      .flat()
+      .find((address) => address && !address.internal && address.family === 'IPv4')?.address;
+    expect(assignedIp).toBeTruthy();
+    const env = {
+      VIVENTIUM_PUBLIC_NETWORK_STATE_FILE: file,
+      VIVENTIUM_LAN_DOMAIN: 'lan.example.test',
+      VIVENTIUM_LIBRECHAT_ORIGIN: 'https://librechat.example.test',
+      VIVENTIUM_CALL_SESSION_SECRET: 'server-secret',
+      LIVEKIT_API_KEY: 'key',
+      LIVEKIT_API_SECRET: 'secret',
+      LIVEKIT_URL: 'ws://localhost:7888',
+      VIVENTIUM_LIVEKIT_AGENT_DISPATCH_MODE: 'room_config',
+      VIVENTIUM_LAN_PLAYGROUND_URL: 'https://playground.lan.example.test:8443',
+      VIVENTIUM_LAN_LIVEKIT_URL: 'wss://livekit.lan.example.test:8444',
+    };
+    Object.assign(process.env, env);
+    liveKitMocks.listDispatch.mockResolvedValue([
+      {
+        id: 'dispatch-ready',
+        agentName: canonical.gatewayAgentName,
+        state: {
+          jobs: [
+            {
+              id: 'job-ready',
+              dispatchId: 'dispatch-ready',
+              state: { status: 1, workerId: 'worker-1' },
+            },
+          ],
+        },
+      },
+    ]);
+    try {
+      const { POST } = await import('@/app/api/connection-details/route');
+      const check = async (
+        ready: boolean,
+        port: number,
+        requestPort: number,
+        expected: number,
+        publishedIp = assignedIp
+      ) => {
+        writeFileSync(
+          file,
+          JSON.stringify({
+            lan_ip: publishedIp,
+            lan_runtime_ready: ready,
+            lan_playground_url: `https://playground.lan.example.test:${port}`,
+            lan_livekit_url: `wss://livekit.lan.example.test:${port + 1}`,
+          })
+        );
+        vi.stubGlobal(
+          'fetch',
+          vi
+            .fn()
+            .mockResolvedValueOnce(new Response(JSON.stringify(canonical), { status: 200 }))
+            .mockResolvedValue(new Response(JSON.stringify({ status: 'already' }), { status: 200 }))
+        );
+        const origin = `https://playground.lan.example.test:${requestPort}`;
+        const response = await POST(
+          new Request(origin + '/api/connection-details', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Origin: origin,
+              'X-VIVENTIUM-CALL-CAPABILITY': 'A'.repeat(43),
+            },
+            body: JSON.stringify({
+              agentMetadata: JSON.stringify({ callSessionId: canonical.callSessionId }),
+            }),
+          })
+        );
+        const body = await response.json();
+        expect(response.status, JSON.stringify(body)).toBe(expected);
+        if (expected === 200)
+          expect(body.serverUrl).toBe(`wss://livekit.lan.example.test:${port + 1}`);
+        else expect(body.code).toBe('network_not_ready');
+      };
+      await check(true, 8443, 8443, 200);
+      await check(true, 8443, 8443, 503, '192.168.56.21');
+      await check(false, 9443, 9443, 503);
+      await check(true, 9443, 9443, 200);
+      await check(true, 9443, 8443, 503);
+    } finally {
+      for (const key of Object.keys(env)) delete process.env[key];
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    [
+      'https://192.168.1.20:8443',
+      'wss://192.168.1.20:8444',
+      'https://192.168.1.20:8443',
+      'wss://192.168.1.20:8444',
+    ],
+    [
+      'https://playground.lan.example.test:8443',
+      'wss://livekit.lan.example.test:8444',
+      'https://playground.lan.example.test:8443',
+      'wss://livekit.lan.example.test:8444',
+    ],
+    [
+      'https://voice.example.test',
+      'wss://signal.example.test',
+      'https://192.168.1.20:8443',
+      'wss://192.168.1.20:8444',
+    ],
+    [
+      'http://localhost:3300',
+      'ws://localhost:7888',
+      'https://192.168.1.20:8443',
+      'wss://192.168.1.20:8444',
+    ],
+  ])(
+    'keeps %s on its configured signaling route',
+    async (origin, expected, lanOrigin, lanSignal) => {
+      process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'https://librechat.example.test';
+      process.env.VIVENTIUM_CALL_SESSION_SECRET = 'server-secret';
+      process.env.LIVEKIT_API_KEY = 'test-key';
+      process.env.LIVEKIT_API_SECRET = 'test-secret';
+      process.env.LIVEKIT_URL = 'ws://localhost:7888';
+      process.env.VIVENTIUM_LIVEKIT_AGENT_DISPATCH_MODE = 'room_config';
+      process.env.VIVENTIUM_PUBLIC_PLAYGROUND_URL = 'https://voice.example.test';
+      process.env.VIVENTIUM_PUBLIC_LIVEKIT_URL = 'wss://signal.example.test';
+      process.env.VIVENTIUM_LAN_PLAYGROUND_URL = lanOrigin;
+      process.env.VIVENTIUM_LAN_LIVEKIT_URL = lanSignal;
+      liveKitMocks.listDispatch.mockResolvedValue([
+        {
+          id: 'dispatch-ready',
+          agentName: canonical.gatewayAgentName,
+          state: {
+            jobs: [
+              {
+                id: 'job-ready',
+                dispatchId: 'dispatch-ready',
+                state: { status: 1, workerId: 'worker-1' },
+              },
+            ],
+          },
+        },
+      ]);
+      vi.stubGlobal(
+        'fetch',
+        vi
+          .fn()
+          .mockResolvedValueOnce(new Response(JSON.stringify(canonical), { status: 200 }))
+          .mockResolvedValue(new Response(JSON.stringify({ status: 'already' }), { status: 200 }))
+      );
+      try {
+        const { POST } = await import('@/app/api/connection-details/route');
+        const response = await POST(
+          new Request(origin + '/api/connection-details', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Origin: origin,
+              'X-VIVENTIUM-CALL-CAPABILITY': 'A'.repeat(43),
+            },
+            body: JSON.stringify({
+              agentMetadata: JSON.stringify({ callSessionId: canonical.callSessionId }),
+            }),
+          })
+        );
+        expect(response.status).toBe(200);
+        expect((await response.json()).serverUrl).toBe(expected);
+      } finally {
+        delete process.env.VIVENTIUM_PUBLIC_PLAYGROUND_URL;
+        delete process.env.VIVENTIUM_PUBLIC_LIVEKIT_URL;
+        delete process.env.VIVENTIUM_LAN_PLAYGROUND_URL;
+        delete process.env.VIVENTIUM_LAN_LIVEKIT_URL;
+      }
+    }
+  );
+});
+// VIVENTIUM END

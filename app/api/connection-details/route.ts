@@ -5,6 +5,8 @@
 import { NextResponse } from 'next/server';
 import { AccessToken, AgentDispatchClient, RoomServiceClient } from 'livekit-server-sdk';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { networkInterfaces } from 'node:os';
 import { AgentDispatch, JobStatus, RoomAgentDispatch, RoomConfiguration } from '@livekit/protocol';
 import {
   AuthoritativeCallSessionError,
@@ -29,6 +31,8 @@ const VIVENTIUM_CALL_SESSION_SECRET = process.env.VIVENTIUM_CALL_SESSION_SECRET;
  * VIVENTIUM END */
 const VIVENTIUM_PUBLIC_PLAYGROUND_URL = process.env.VIVENTIUM_PUBLIC_PLAYGROUND_URL;
 const VIVENTIUM_PUBLIC_LIVEKIT_URL = process.env.VIVENTIUM_PUBLIC_LIVEKIT_URL;
+const VIVENTIUM_LAN_PLAYGROUND_URL = process.env.VIVENTIUM_LAN_PLAYGROUND_URL;
+const VIVENTIUM_LAN_LIVEKIT_URL = process.env.VIVENTIUM_LAN_LIVEKIT_URL;
 const VIVENTIUM_LIVEKIT_AGENT_DISPATCH_MODE = process.env.VIVENTIUM_LIVEKIT_AGENT_DISPATCH_MODE;
 const ALLOW_DIRECT_AGENT_DISPATCH =
   process.env.VIVENTIUM_ALLOW_DIRECT_AGENT_DISPATCH === '1' ||
@@ -274,11 +278,62 @@ function requestOrigin(req: Request): string | null {
 }
 
 function resolveBrowserLiveKitUrl(req: Request): string | undefined {
-  const publicPlaygroundOrigin = normalizeOrigin(VIVENTIUM_PUBLIC_PLAYGROUND_URL);
-  const publicLivekitUrl = VIVENTIUM_PUBLIC_LIVEKIT_URL;
+  let lanPlayground = VIVENTIUM_LAN_PLAYGROUND_URL;
+  let lanLivekit = VIVENTIUM_LAN_LIVEKIT_URL;
+  let publicPlayground = VIVENTIUM_PUBLIC_PLAYGROUND_URL;
+  let publicLivekitUrl = VIVENTIUM_PUBLIC_LIVEKIT_URL;
+  const stateFile = process.env.VIVENTIUM_PUBLIC_NETWORK_STATE_FILE;
+  if (stateFile) {
+    // The launcher publishes one identity only after both edge and media listeners are ready.
+    // A stale or unreadable managed identity must never fall back to startup addresses.
+    lanPlayground = undefined;
+    lanLivekit = undefined;
+    publicPlayground = undefined;
+    publicLivekitUrl = undefined;
+    try {
+      const state = JSON.parse(readFileSync(stateFile, 'utf8'));
+      if (
+        !state.last_error &&
+        (!state.lan_ip ||
+          (state.lan_runtime_ready === true &&
+            Object.values(networkInterfaces())
+              .flat()
+              .some((address) => address && !address.internal && address.address === state.lan_ip)))
+      ) {
+        publicPlayground = state.public_playground_url;
+        publicLivekitUrl = state.public_livekit_url;
+      }
+      if (
+        state.lan_runtime_ready === true &&
+        Object.values(networkInterfaces())
+          .flat()
+          .some((address) => address && !address.internal && address.address === state.lan_ip)
+      ) {
+        lanPlayground = state.lan_playground_url;
+        lanLivekit = state.lan_livekit_url;
+      }
+    } catch {
+      /* The next request can observe a recovered identity. */
+    }
+  }
+  const lanOrigin = normalizeOrigin(lanPlayground);
+  if (lanOrigin && lanLivekit && requestOrigin(req) === lanOrigin) return lanLivekit;
+  const incomingOrigin = requestOrigin(req);
+  const lanDomain = process.env.VIVENTIUM_LAN_DOMAIN;
+  if (
+    stateFile &&
+    incomingOrigin &&
+    (incomingOrigin === normalizeOrigin(VIVENTIUM_LAN_PLAYGROUND_URL) ||
+      (lanDomain && new URL(incomingOrigin).hostname === `playground.${lanDomain}`))
+  ) {
+    return undefined;
+  }
+  const publicPlaygroundOrigin = normalizeOrigin(publicPlayground);
   if (publicPlaygroundOrigin && publicLivekitUrl && requestOrigin(req) === publicPlaygroundOrigin) {
     return publicLivekitUrl;
   }
+  if (stateFile && incomingOrigin === normalizeOrigin(VIVENTIUM_PUBLIC_PLAYGROUND_URL))
+    return undefined;
   return NEXT_PUBLIC_LIVEKIT_URL ?? LIVEKIT_URL;
 }
 
@@ -656,8 +711,18 @@ async function connectionDetails(
       );
     }
     const browserLiveKitUrl = resolveBrowserLiveKitUrl(req);
-    if (!LIVEKIT_URL && !NEXT_PUBLIC_LIVEKIT_URL && !browserLiveKitUrl) {
-      throw new Error('LIVEKIT_URL is not defined');
+    if (!browserLiveKitUrl) {
+      const managedNetworkPending = Boolean(process.env.VIVENTIUM_PUBLIC_NETWORK_STATE_FILE);
+      return NextResponse.json(
+        {
+          code: managedNetworkPending ? 'network_not_ready' : 'gateway_down',
+          message: managedNetworkPending
+            ? 'Calling is reconnecting to the current network. Please try again.'
+            : 'The LiveKit signaling URL is not configured.',
+          retryable: managedNetworkPending,
+        },
+        { status: 503 }
+      );
     }
     if (API_KEY === undefined) {
       throw new Error('LIVEKIT_API_KEY is not defined');
