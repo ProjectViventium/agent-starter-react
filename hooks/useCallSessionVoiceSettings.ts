@@ -54,7 +54,6 @@ export type UseCallSessionVoiceSettingsResult = {
   isSaving: boolean;
   error: string | null;
   issue: CallIssue | null;
-  notice: string | null;
   setRequestedVoiceRoute: (nextRoute: VoiceRouteState) => Promise<boolean>;
 };
 
@@ -170,6 +169,13 @@ function normalizeAssistantRouteInfo(value: unknown): AssistantRouteInfo | null 
   };
 }
 
+function normalizeSelectionRoute(value: unknown): VoiceRouteMetadata | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  return normalizeVoiceRouteMetadata(value);
+}
+
 async function requestVoiceSettings(
   method: 'GET' | 'POST',
   callSessionId: string,
@@ -246,8 +252,7 @@ async function requestVoiceSettings(
 }
 
 export function useCallSessionVoiceSettings(
-  callSessionId: string | null,
-  fallbackVoiceRoute: VoiceRouteMetadata
+  callSessionId: string | null
 ): UseCallSessionVoiceSettingsResult {
   const [requestedVoiceRoute, setRequestedVoiceRouteState] = useState<VoiceRouteState>(
     createEmptyVoiceRouteState()
@@ -261,24 +266,9 @@ export function useCallSessionVoiceSettings(
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [issue, setIssue] = useState<CallIssue | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
 
-  const normalizedSelectionVoiceRoute = useMemo(() => {
-    if (!selectionVoiceRoute) {
-      return null;
-    }
-    return normalizeVoiceRouteMetadata(selectionVoiceRoute, fallbackVoiceRoute);
-  }, [fallbackVoiceRoute, selectionVoiceRoute]);
-
-  const normalizeSelectionRoute = useCallback(
-    (value: unknown) => {
-      if (!value || typeof value !== 'object') {
-        return null;
-      }
-      return normalizeVoiceRouteMetadata(value, fallbackVoiceRoute);
-    },
-    [fallbackVoiceRoute]
-  );
+  // The catalog is whatever the gateway reports; there is no built-in fallback catalog.
+  const normalizedSelectionVoiceRoute = selectionVoiceRoute;
 
   useEffect(() => {
     if (!callSessionId) {
@@ -290,7 +280,6 @@ export function useCallSessionVoiceSettings(
       setIsSaving(false);
       setError(null);
       setIssue(null);
-      setNotice(null);
       return;
     }
 
@@ -299,7 +288,6 @@ export function useCallSessionVoiceSettings(
     setIsLoading(true);
     setError(null);
     setIssue(null);
-    setNotice(null);
     setAssistantRoute(null);
 
     const loadVoiceSettings = (attempt: number) => {
@@ -360,7 +348,7 @@ export function useCallSessionVoiceSettings(
         clearTimeout(retryTimeoutId);
       }
     };
-  }, [callSessionId, normalizeSelectionRoute]);
+  }, [callSessionId]);
 
   const configuredVoiceRoute = useMemo<VoiceRouteState>(
     () => ({
@@ -410,7 +398,6 @@ export function useCallSessionVoiceSettings(
   const setRequestedVoiceRoute = useCallback(
     async (nextRoute: VoiceRouteState) => {
       const normalizedRoute = normalizeVoiceRouteState(nextRoute);
-      setNotice(null);
       setRequestedVoiceRouteState(normalizedRoute);
 
       if (!callSessionId) {
@@ -443,7 +430,7 @@ export function useCallSessionVoiceSettings(
         setIsSaving(false);
       }
     },
-    [callSessionId, normalizeSelectionRoute, requestedVoiceRoute]
+    [callSessionId, requestedVoiceRoute]
   );
 
   return {
@@ -456,7 +443,6 @@ export function useCallSessionVoiceSettings(
     isSaving,
     error: error ?? routeIssue?.message ?? null,
     issue: issue ?? routeIssue,
-    notice,
     setRequestedVoiceRoute,
   };
 }

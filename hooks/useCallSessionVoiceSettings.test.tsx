@@ -98,7 +98,7 @@ describe('useCallSessionVoiceSettings immutable route preflight', () => {
           )
       )
     );
-    const { result } = renderHook(() => useCallSessionVoiceSettings('synthetic-call', metadata));
+    const { result } = renderHook(() => useCallSessionVoiceSettings('synthetic-call'));
     await waitFor(() => expect(result.current.assistantRoute?.effective.effort).toBe('high'));
     expect(result.current.assistantRoute?.primary.effort).toBe('high');
     expect(result.current.assistantRoute?.voiceFallbackLlm?.effort).toBe('high');
@@ -127,7 +127,7 @@ describe('useCallSessionVoiceSettings immutable route preflight', () => {
       )
     );
     vi.stubGlobal('fetch', fetchMock);
-    const { result } = renderHook(() => useCallSessionVoiceSettings('synthetic-call', metadata));
+    const { result } = renderHook(() => useCallSessionVoiceSettings('synthetic-call'));
     await waitFor(() =>
       expect(result.current.assistantRoute?.effective.providerLabel).toBe('xPerfect')
     );
@@ -165,7 +165,7 @@ describe('useCallSessionVoiceSettings immutable route preflight', () => {
         )
       )
     );
-    const { result } = renderHook(() => useCallSessionVoiceSettings('synthetic-call', metadata));
+    const { result } = renderHook(() => useCallSessionVoiceSettings('synthetic-call'));
     await waitFor(() =>
       expect(result.current.assistantRoute?.effective.model).toBe('unknown-model')
     );
@@ -210,7 +210,7 @@ describe('useCallSessionVoiceSettings immutable route preflight', () => {
       )
       .mockResolvedValueOnce(response(next));
     vi.stubGlobal('fetch', fetchMock);
-    const { result } = renderHook(() => useCallSessionVoiceSettings('call-1', metadata));
+    const { result } = renderHook(() => useCallSessionVoiceSettings('call-1'));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     await act(async () => {
       expect(await result.current.setRequestedVoiceRoute(next)).toBe(false);
@@ -240,7 +240,7 @@ describe('useCallSessionVoiceSettings immutable route preflight', () => {
       )
     );
     vi.stubGlobal('fetch', fetchMock);
-    const { result } = renderHook(() => useCallSessionVoiceSettings('call-1', metadata));
+    const { result } = renderHook(() => useCallSessionVoiceSettings('call-1'));
 
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     expect(result.current.configuredVoiceRoute).toEqual(requestedVoiceRoute);
@@ -267,7 +267,7 @@ describe('useCallSessionVoiceSettings immutable route preflight', () => {
       )
     );
     vi.stubGlobal('fetch', fetchMock);
-    const { result } = renderHook(() => useCallSessionVoiceSettings('call-1', metadata));
+    const { result } = renderHook(() => useCallSessionVoiceSettings('call-1'));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     expect(result.current.issue?.kind).toBe('no_route');
   });

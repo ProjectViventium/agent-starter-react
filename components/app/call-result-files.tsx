@@ -1,53 +1,46 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
-import { Button } from '@/components/livekit/button';
+/*
+ * Result file cards (CP-CMP-035): when finished work produced files, list their names with a
+ * way to open them in the chat. Files are never opened or downloaded on the call page.
+ */
+import { useEffect, useState } from 'react';
+import { CallButton } from '@/components/app/call-button';
 import {
   callBrowserCapabilityHeaders,
   readCallBrowserCapability,
   readCallOpenerOrigin,
 } from '@/lib/call-browser-capability';
 import { resolveLinkedChatHref, resolveLinkedChatOrigin } from '@/lib/call-handoff';
-import { parseTaskEvent } from '@/lib/voice-events';
-import type { VoiceTaskView } from '@/lib/voice-events';
+import { type VoiceTaskView, parseTaskEvent } from '@/lib/voice-events';
 
-/* VIVENTIUM START Saved file names stay visible until dismissal or the existing ended-call handoff. */
-type ResultFilesReadReason =
-  | 'missing_capability'
-  | 'http_error'
-  | 'unsupported_version'
-  | 'invalid_event'
-  | 'not_completed'
-  | 'task_mismatch'
-  | 'call_mismatch'
-  | 'result_mismatch'
-  | 'conversation_mismatch'
-  | 'stale_sequence'
-  | 'missing_filenames'
-  | 'invalid_filenames'
-  | 'valid'
-  | 'disposed'
-  | 'read_failed';
-
-type ResultFilesReadTrace = {
-  stage:
-    | 'fetch_started'
-    | 'http_response'
-    | 'validation'
-    | 'accepted'
-    | 'read_skipped'
-    | 'read_failed';
-  expectedSequence: number;
-  httpStatus?: number;
-  reason?: ResultFilesReadReason;
-  returnedSequence?: number;
-  returnedNameCount?: number;
-  acceptedCount?: number;
-};
-
-function traceResultFilesRead(trace: ResultFilesReadTrace, warning = false) {
-  const write = warning ? console.warn : console.debug;
-  write('[ViventiumCallFiles]', JSON.stringify(trace));
+/**
+ * The file names of a finished task, or the reason the server's reply is not accepted. The reply
+ * counts only when it is about exactly this task, call, result message and conversation and is
+ * not older than what the page already knows.
+ */
+function readResultFilenames(
+  payload: { version?: unknown; event?: unknown; resultFilenames?: unknown } | null,
+  task: Pick<
+    VoiceTaskView,
+    'taskId' | 'callSessionId' | 'resultMessageId' | 'conversationId' | 'sequence'
+  >
+): { names: string[] } | { rejected: string } {
+  const event = parseTaskEvent(payload?.event);
+  const names = payload?.resultFilenames;
+  if (payload?.version !== 1) return { rejected: 'unsupported_version' };
+  if (!event) return { rejected: 'invalid_event' };
+  if (event.state !== 'completed') return { rejected: 'not_completed' };
+  if (event.taskId !== task.taskId) return { rejected: 'task_mismatch' };
+  if (event.callSessionId !== task.callSessionId) return { rejected: 'call_mismatch' };
+  if (event.resultMessageId !== task.resultMessageId) return { rejected: 'result_mismatch' };
+  if (event.conversationId !== task.conversationId) return { rejected: 'conversation_mismatch' };
+  if (event.sequence < task.sequence) return { rejected: 'stale_sequence' };
+  if (!Array.isArray(names)) return { rejected: 'missing_filenames' };
+  if (!names.every((name: unknown) => typeof name === 'string' && name.trim())) {
+    return { rejected: 'invalid_filenames' };
+  }
+  return { names: names as string[] };
 }
 
 function ResultFiles({ task }: { task: VoiceTaskView }) {
@@ -61,19 +54,10 @@ function ResultFiles({ task }: { task: VoiceTaskView }) {
   );
 
   useEffect(() => {
-    if (!resultMessageId) return;
-    if (!readCallBrowserCapability(callSessionId)) {
-      traceResultFilesRead(
-        { stage: 'read_skipped', expectedSequence: sequence, reason: 'missing_capability' },
-        true
-      );
-      return;
-    }
+    if (!resultMessageId || !readCallBrowserCapability(callSessionId)) return;
     const controller = new AbortController();
-    let disposed = false;
     void (async () => {
       try {
-        traceResultFilesRead({ stage: 'fetch_started', expectedSequence: sequence });
         const response = await fetch(
           `/api/call-tasks/${encodeURIComponent(taskId)}?callSessionId=${encodeURIComponent(callSessionId)}`,
           {
@@ -82,74 +66,30 @@ function ResultFiles({ task }: { task: VoiceTaskView }) {
             signal: controller.signal,
           }
         );
-        const httpStatus = Number.isInteger(response.status) ? response.status : undefined;
-        traceResultFilesRead({ stage: 'http_response', expectedSequence: sequence, httpStatus });
-        if (!response.ok) {
-          traceResultFilesRead(
-            { stage: 'validation', expectedSequence: sequence, httpStatus, reason: 'http_error' },
-            true
-          );
+        const outcome = response.ok
+          ? readResultFilenames(await response.json(), {
+              taskId,
+              callSessionId,
+              resultMessageId,
+              conversationId,
+              sequence,
+            })
+          : { rejected: `http_${response.status}` };
+        if (controller.signal.aborted) return;
+        if ('rejected' in outcome) {
+          // No names, addresses or ids: only why the read was not used.
+          console.warn(`[Viventium] Result files were not shown (${outcome.rejected}).`);
           return;
         }
-        const payload: { version?: number; event?: unknown; resultFilenames?: unknown } =
-          await response.json();
-        const event = parseTaskEvent(payload?.event);
-        const names = payload?.resultFilenames;
-        let reason: ResultFilesReadReason = 'valid';
-        if (payload?.version !== 1) reason = 'unsupported_version';
-        else if (!event) reason = 'invalid_event';
-        else if (event.state !== 'completed') reason = 'not_completed';
-        else if (event.taskId !== taskId) reason = 'task_mismatch';
-        else if (event.callSessionId !== callSessionId) reason = 'call_mismatch';
-        else if (event.resultMessageId !== resultMessageId) reason = 'result_mismatch';
-        else if (event.conversationId !== conversationId) reason = 'conversation_mismatch';
-        else if (event.sequence < sequence) reason = 'stale_sequence';
-        else if (!Array.isArray(names)) reason = 'missing_filenames';
-        else if (!names.every((name: unknown) => typeof name === 'string' && name.trim()))
-          reason = 'invalid_filenames';
-        traceResultFilesRead(
-          {
-            stage: 'validation',
-            expectedSequence: sequence,
-            httpStatus,
-            reason,
-            returnedSequence: event?.sequence,
-            returnedNameCount: Array.isArray(names) ? names.length : undefined,
-          },
-          reason !== 'valid'
-        );
-        if (reason !== 'valid') return;
-        if (!disposed) {
-          setFilenames(names as string[]);
-          traceResultFilesRead({
-            stage: 'accepted',
-            expectedSequence: sequence,
-            returnedSequence: event?.sequence,
-            acceptedCount: (names as string[]).length,
-          });
-        } else {
-          traceResultFilesRead({
-            stage: 'read_skipped',
-            expectedSequence: sequence,
-            reason: 'disposed',
-          });
-        }
+        setFilenames(outcome.names);
       } catch {
-        traceResultFilesRead(
-          {
-            stage: disposed || controller.signal.aborted ? 'read_skipped' : 'read_failed',
-            expectedSequence: sequence,
-            reason: disposed || controller.signal.aborted ? 'disposed' : 'read_failed',
-          },
-          !disposed && !controller.signal.aborted
-        );
-        // Existing authenticated chat remains the durable file access path.
+        if (!controller.signal.aborted) {
+          console.warn('[Viventium] Result files were not shown (read_failed).');
+        }
+        // The files stay available in the chat.
       }
     })();
-    return () => {
-      disposed = true;
-      controller.abort();
-    };
+    return () => controller.abort();
   }, [callSessionId, taskId, resultMessageId, conversationId, sequence]);
 
   if (dismissed || !filenames.length || !chatHref) return null;
@@ -164,20 +104,20 @@ function ResultFiles({ task }: { task: VoiceTaskView }) {
             <li key={`${index}:${filename}`}>{filename}</li>
           ))}
         </ul>
-        <Button
+        <CallButton
           size="sm"
           variant="outline"
           onClick={() => setDismissed(true)}
           aria-label="Dismiss files"
         >
           Dismiss
-        </Button>
+        </CallButton>
       </div>
       <a
         href={chatHref}
         target="_blank"
         rel="noopener noreferrer"
-        className="mt-2 inline-block underline"
+        className="mt-2 inline-block underline underline-offset-4"
       >
         Open in chat
       </a>
@@ -215,4 +155,3 @@ export function CallResultFiles({
     </>
   );
 }
-/* VIVENTIUM END */

@@ -285,14 +285,10 @@ describe('call engagement classification proxy', () => {
     }
   );
 
-  it('passes an already-cancelled browser request to fetch as aborted', async () => {
+  it('does not contact Core for an already-cancelled browser request', async () => {
     process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'https://librechat.example.com';
     process.env.VIVENTIUM_CALL_SESSION_SECRET = 'synthetic-server-secret';
-    let coreSignal: AbortSignal | null | undefined;
-    const fetchMock = vi.fn((_url: URL, init?: RequestInit) => {
-      coreSignal = init?.signal;
-      return Promise.reject(new DOMException('Aborted', 'AbortError'));
-    });
+    const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     const browserRequest = new AbortController();
     browserRequest.abort();
@@ -304,8 +300,7 @@ describe('call engagement classification proxy', () => {
       })
     );
 
-    expect(fetchMock).toHaveBeenCalledOnce();
-    expect(coreSignal?.aborted).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(response.status).toBe(503);
   });
 

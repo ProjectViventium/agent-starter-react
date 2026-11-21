@@ -1,4 +1,5 @@
 import type { VoiceCallMode } from '@/hooks/useCallSessionState';
+import { CALL_IDENTIFIER_PATTERN } from '@/lib/call-proxy';
 
 export const VIVENTIUM_CALL_STATE_TOPIC = 'viventium.call.state.v1';
 
@@ -33,7 +34,7 @@ export function parseVoiceCallState(value: unknown): VoiceCallStateV1 | null {
   if (
     state.version !== 1 ||
     typeof state.callSessionId !== 'string' ||
-    !/^[A-Za-z0-9._:-]{1,160}$/.test(state.callSessionId) ||
+    !CALL_IDENTIFIER_PATTERN.test(state.callSessionId) ||
     (state.mode !== 'call' && state.mode !== 'wing' && state.mode !== 'listen_only') ||
     !VOICE_CALL_STATUSES.includes(state.status as VoiceCallStatus) ||
     typeof state.revision !== 'number' ||
@@ -56,7 +57,7 @@ export function parseVoiceCallState(value: unknown): VoiceCallStateV1 | null {
 
 export async function publishVoiceCallState(
   participant: {
-    publishData: (payload: Uint8Array, options: { topic: string }) => Promise<unknown>;
+    publishData: (payload: Uint8Array<ArrayBuffer>, options: { topic: string }) => Promise<unknown>;
   },
   state: VoiceCallStateV1
 ) {

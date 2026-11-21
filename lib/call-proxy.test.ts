@@ -16,6 +16,11 @@ describe('call proxy boundary', () => {
     expect(parseTaskInput({ value: 'yes' })).toBeNull();
   });
 
+  it.each(['.', '..'])('rejects URL dot-segment identifier %s', (value) => {
+    expect(parseCallIdentifier(value)).toBeNull();
+    expect(parseCallIdentifier('task.part-1')).toBe('task.part-1');
+  });
+
   it('maps only exact classified upstream codes and status fallbacks', () => {
     expect(normalizeProxyFailure(503, { code: 'provider_failure', message: 'Down' })).toEqual({
       code: 'provider_failure',

@@ -1,13 +1,13 @@
 'use client';
 
-/* VIVENTIUM START
- * Purpose: Viventium agent-starter customization.
- * Feature: Call-session state hook for Wing Mode, Listen-Only Mode, and keepalive
- *
- * Why:
- * - Keep active calls alive through long silence windows by periodically touching the call session.
- * - Expose persisted call-mode toggles for the modern playground.
- * VIVENTIUM END */
+/*
+ * The page's copy of the server-held call state (CP-HL-010, CP-HL-011):
+ * - the call mode (Call / Wing / Listen-Only) and the one request that changes it;
+ * - the keepalive that carries an open call through long silences;
+ * - the call status Core reports (there is no pushed status, so it is read over HTTP).
+ * One contract in and out: `mode`. The legacy boolean fields are gone from this hook; the BFF
+ * route derives `mode` if an old record lacks it.
+ */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { callBrowserCapabilityHeaders } from '@/lib/call-browser-capability';
 import { type CallIssue, CallRequestError, callIssueFromResponse } from '@/lib/call-start';
@@ -35,11 +35,6 @@ export type CallKeepaliveReceipt = { callSessionId: string; sequence: number };
 
 type CallSessionStateResponse = {
   callSessionId?: string;
-  roomName?: string;
-  expiresAtMs?: number | null;
-  wingModeEnabled?: boolean;
-  shadowModeEnabled?: boolean;
-  listenOnlyModeEnabled?: boolean;
   mode?: VoiceCallMode;
   message?: string;
   error?: unknown;
@@ -55,36 +50,22 @@ export type UseCallSessionStateResult = {
   mode: VoiceCallMode;
   authoritativeStatus: VoiceCallStatus | null;
   modePending: boolean;
-  wingModeEnabled: boolean;
-  wingModePending: boolean;
-  listenOnlyModeEnabled: boolean;
-  listenOnlyModePending: boolean;
   callStateError: string | null;
   callStateIssue: CallIssue | null;
   callStateRetryable: boolean;
   lastModeTransition: VoiceCallStateV1 | null;
   lastKeepalive: CallKeepaliveReceipt | null;
   setMode: (mode: VoiceCallMode) => Promise<boolean>;
-  setWingModeEnabled: (enabled: boolean) => Promise<boolean>;
-  setListenOnlyModeEnabled: (enabled: boolean) => Promise<boolean>;
+  /** Retry the same authoritative GET after a failed initial check. */
+  refreshState: () => Promise<boolean>;
 };
 
 function normalizeResponse(
   payload: CallSessionStateResponse | null | undefined,
   expectedCallSessionId?: string
 ) {
-  const legacyMode: VoiceCallMode =
-    payload?.listenOnlyModeEnabled === true
-      ? 'listen_only'
-      : payload?.wingModeEnabled === true ||
-          (typeof payload?.wingModeEnabled !== 'boolean' && payload?.shadowModeEnabled === true)
-        ? 'wing'
-        : 'call';
   const mode: VoiceCallMode =
-    payload?.mode === 'call' || payload?.mode === 'wing' || payload?.mode === 'listen_only'
-      ? payload.mode
-      : legacyMode;
-  const listenOnlyModeEnabled = mode === 'listen_only';
+    payload?.mode === 'wing' || payload?.mode === 'listen_only' ? payload.mode : 'call';
   const authoritativeCallState = parseVoiceCallState(payload);
   if (
     authoritativeCallState &&
@@ -110,12 +91,6 @@ function normalizeResponse(
       : null;
   return {
     mode,
-    wingModeEnabled: mode === 'wing',
-    listenOnlyModeEnabled,
-    expiresAtMs:
-      typeof payload?.expiresAtMs === 'number' && Number.isFinite(payload.expiresAtMs)
-        ? payload.expiresAtMs
-        : null,
     message: structuredIssue?.message ?? null,
     issue: structuredIssue,
     retryable: structuredIssue?.retryable === true,
@@ -221,10 +196,6 @@ export function useCallSessionState(
   const [mode, setModeState] = useState<VoiceCallMode>('call');
   const [authoritativeStatus, setAuthoritativeStatus] = useState<VoiceCallStatus | null>(null);
   const [modePending, setModePending] = useState(false);
-  const [wingModeEnabled, setWingModeEnabledState] = useState(false);
-  const [wingModePending, setWingModePending] = useState(false);
-  const [listenOnlyModeEnabled, setListenOnlyModeEnabledState] = useState(false);
-  const [listenOnlyModePending, setListenOnlyModePending] = useState(false);
   const [callStateError, setCallStateError] = useState<string | null>(null);
   const [callStateIssue, setCallStateIssue] = useState<CallIssue | null>(null);
   const [callStateRetryable, setCallStateRetryable] = useState(false);
@@ -238,8 +209,6 @@ export function useCallSessionState(
 
   const applyState = useCallback((next: ReturnType<typeof normalizeResponse>) => {
     setModeState(next.mode);
-    setWingModeEnabledState(next.wingModeEnabled);
-    setListenOnlyModeEnabledState(next.listenOnlyModeEnabled);
     setCallStateError(next.message ?? null);
     setCallStateIssue(next.issue);
     setCallStateRetryable(next.retryable);
@@ -313,10 +282,6 @@ export function useCallSessionState(
     setModeState('call');
     setAuthoritativeStatus(null);
     setModePending(false);
-    setWingModeEnabledState(false);
-    setWingModePending(false);
-    setListenOnlyModeEnabledState(false);
-    setListenOnlyModePending(false);
     setCallStateError(null);
     setCallStateIssue(null);
     setCallStateRetryable(false);
@@ -524,22 +489,12 @@ export function useCallSessionState(
       }
 
       setModePending(true);
-      setWingModePending(nextMode === 'wing' || mode === 'wing');
-      setListenOnlyModePending(nextMode === 'listen_only' || mode === 'listen_only');
       modeMutationPendingRef.current = true;
       modeMutationControllerRef.current?.abort();
       const controller = new AbortController();
       modeMutationControllerRef.current = controller;
       try {
-        const next = await syncState(
-          {
-            touch: true,
-            mode: nextMode,
-            wingModeEnabled: nextMode === 'wing',
-            listenOnlyModeEnabled: nextMode === 'listen_only',
-          },
-          controller.signal
-        );
+        const next = await syncState({ touch: true, mode: nextMode }, controller.signal);
         if (next?.mode === nextMode && next.authoritativeCallState?.mode === nextMode) {
           setLastModeTransition(next.authoritativeCallState);
         }
@@ -566,41 +521,42 @@ export function useCallSessionState(
           modeMutationControllerRef.current = null;
           modeMutationPendingRef.current = false;
           setModePending(false);
-          setWingModePending(false);
-          setListenOnlyModePending(false);
         }
       }
     },
-    [callSessionId, mode, syncState]
+    [callSessionId, syncState]
   );
 
-  const setWingModeEnabled = useCallback(
-    async (enabled: boolean) => setMode(enabled ? 'wing' : 'call'),
-    [setMode]
-  );
-
-  const setListenOnlyModeEnabled = useCallback(
-    async (enabled: boolean) => {
-      return setMode(enabled ? 'listen_only' : 'call');
-    },
-    [setMode]
-  );
+  const refreshState = useCallback(async () => {
+    try {
+      const next = await syncState();
+      return Boolean(next?.authoritativeCallState);
+    } catch (error) {
+      if (isAbortError(error)) return false;
+      const message = formatCallSessionStateError(error, 'Call session check failed.');
+      setCallStateError(message);
+      setCallStateIssue(
+        error instanceof CallRequestError
+          ? { kind: error.code, message: error.message }
+          : { kind: error instanceof TypeError ? 'gateway_down' : 'unknown', message }
+      );
+      setCallStateRetryable(
+        error instanceof CallRequestError ? error.retryable : error instanceof TypeError
+      );
+      return false;
+    }
+  }, [syncState]);
 
   return {
     mode,
     authoritativeStatus,
     modePending,
-    wingModeEnabled,
-    wingModePending,
-    listenOnlyModeEnabled,
-    listenOnlyModePending,
     callStateError,
     callStateIssue,
     callStateRetryable,
     lastModeTransition,
     lastKeepalive,
     setMode,
-    setWingModeEnabled,
-    setListenOnlyModeEnabled,
+    refreshState,
   };
 }

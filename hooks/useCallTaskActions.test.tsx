@@ -10,6 +10,35 @@ afterEach(() => {
 });
 
 describe('useCallTaskActions', () => {
+  it('never logs task input, identities, credentials or raw runtime failures', async () => {
+    const logs = (['debug', 'info', 'log', 'warn', 'error'] as const).map((level) =>
+      vi.spyOn(console, level).mockImplementation(() => undefined)
+    );
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValue(
+        new TypeError('synthetic-private-error qa@example.test bearer synthetic-private-token')
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const { result } = renderHook(() => useCallTaskActions('synthetic-private-call'));
+    try {
+      await act(async () => {
+        expect(
+          await result.current.submitInput(
+            'synthetic-private-task',
+            'Synthetic private task input.'
+          )
+        ).toBe(false);
+      });
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(result.current.actionError).toMatch(/could not reach the task runtime/i);
+      expect(result.current.actionError).not.toContain('synthetic-private-error');
+      for (const log of logs) expect(log).not.toHaveBeenCalled();
+    } finally {
+      logs.forEach((log) => log.mockRestore());
+    }
+  });
+
   it('calls the frozen cancel, retry, and input routes', async () => {
     let sequence = 0;
     const fetchMock = vi.fn().mockImplementation(() => {
@@ -271,7 +300,7 @@ describe('useCallTaskActions', () => {
       vi.stubGlobal(
         'fetch',
         vi.fn(async (url: RequestInfo | URL) => {
-          if (url instanceof URL)
+          if (String(url).startsWith('https://librechat.example.com/'))
             return new Response(JSON.stringify({ version: 1, outcome, event }), { status: 409 });
           return proxyCallTaskRequest(
             '/api/viventium/voice/tasks/task-1/cancel',
@@ -331,84 +360,6 @@ describe('useCallTaskActions', () => {
       expect(await result.current.cancel('task-1')).toBe(false);
     });
     expect(result.current.actionError).not.toBeNull();
-  });
-
-  it('logs only structured action stages and excludes identity, credentials and task input', async () => {
-    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            event: {
-              version: 1,
-              eventId: 'event-1',
-              sequence: 1,
-              emittedAt: '2026-10-05T12:00:00.000Z',
-              callSessionId: 'call-1',
-              taskId: 'task-1',
-              type: 'state',
-              state: 'running',
-              cancellable: true,
-              retryable: false,
-            },
-          }),
-          { status: 200 }
-        )
-      )
-    );
-    const { result } = renderHook(() => useCallTaskActions('call-1'));
-    await act(async () => {
-      expect(await result.current.submitInput('task-1', 'private-user-input')).toBe(true);
-    });
-    const records = debug.mock.calls.filter((args) => args[0] === '[ViventiumCallTaskAction]');
-    expect(records).toHaveLength(3);
-    expect(records.every((args) => typeof args[1] === 'string')).toBe(true);
-    const traces = records.map((args) => JSON.parse(String(args[1])));
-    expect(traces[0]).toEqual({ stage: 'request', action: 'input' });
-    expect(traces[1]).toEqual({
-      stage: 'response',
-      action: 'input',
-      status: 200,
-      elapsedMs: expect.any(Number),
-    });
-    expect(traces[1].elapsedMs).toBeGreaterThanOrEqual(0);
-    expect(traces[2]).toEqual({
-      stage: 'validation',
-      action: 'input',
-      outcome: null,
-      boundEventCount: 1,
-      malformedEvent: false,
-    });
-    const serialized = JSON.stringify(records);
-    for (const privateValue of [
-      'call-1',
-      'task-1',
-      'private-user-input',
-      'server-secret',
-      'http',
-      'capability',
-    ]) {
-      expect(serialized).not.toContain(privateValue);
-    }
-  });
-  it('logs a classified fetch failure without exposing the raw error message', async () => {
-    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockRejectedValue(new TypeError('private-error-and-credential'))
-    );
-    const { result } = renderHook(() => useCallTaskActions('call-1'));
-    await act(async () => {
-      expect(await result.current.cancel('task-1')).toBe(false);
-    });
-    const records = debug.mock.calls.filter((args) => args[0] === '[ViventiumCallTaskAction]');
-    expect(JSON.parse(String(records.at(-1)?.[1]))).toEqual({
-      stage: 'failure',
-      action: 'cancel',
-      failureClass: 'fetch',
-    });
-    expect(JSON.stringify(records)).not.toContain('private-error-and-credential');
   });
 });
 

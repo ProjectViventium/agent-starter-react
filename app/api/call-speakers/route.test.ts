@@ -27,9 +27,7 @@ describe('call speaker snapshot proxy', () => {
 
     expect(response.status).toBe(200);
     expect(fetchMock).toHaveBeenCalledWith(
-      new URL(
-        'https://librechat.example.com/api/viventium/voice/speaker-segments?callSessionId=call-1&beforeSequence=512&beforeSegmentId=segment-512'
-      ),
+      'https://librechat.example.com/api/viventium/voice/speaker-segments?callSessionId=call-1&beforeSequence=512&beforeSegmentId=segment-512',
       expect.any(Object)
     );
   });

@@ -1,20 +1,28 @@
-/* VIVENTIUM START
- * Purpose: Exchange a single-use Telegram launch bearer for per-session browser authority without
- * exposing the global LibreChat secret or placing either bearer in URLs, bodies, logs, or caches.
- * VIVENTIUM END */
+/*
+ * Launch-code exchange proxy (CP-APP-018): swaps a single-use launch bearer (Telegram links)
+ * for the per-call browser capability, without exposing the shared Core secret and without
+ * placing either bearer in a URL, body, log or cache.
+ */
 import { NextResponse } from 'next/server';
+import { corePaths, coreRequest, readCoreText } from '@/app/api/call-tasks/proxy';
 import { normalizeProxyFailure, parseCallIdentifier } from '@/lib/call-proxy';
 
 const LAUNCH_HEADER = 'X-VIVENTIUM-CALL-LAUNCH';
 const IDEMPOTENCY_HEADER = 'X-VIVENTIUM-CALL-LAUNCH-IDEMPOTENCY';
 const SAFE_CAPABILITY = /^[A-Za-z0-9_-]{43}$/;
+const RESPONSE_HEADERS = {
+  'Cache-Control': 'no-store, private',
+  Pragma: 'no-cache',
+  'Referrer-Policy': 'no-referrer',
+} as const;
 
-function responseHeaders(): HeadersInit {
-  return {
-    'Cache-Control': 'no-store, private',
-    Pragma: 'no-cache',
-    'Referrer-Policy': 'no-referrer',
-  };
+function failure(
+  code: 'unknown' | 'auth_expired' | 'gateway_down',
+  message: string,
+  retryable: boolean,
+  status: number
+) {
+  return NextResponse.json({ code, message, retryable }, { status, headers: RESPONSE_HEADERS });
 }
 
 export async function POST(request: Request) {
@@ -22,108 +30,60 @@ export async function POST(request: Request) {
   const launchCapability = request.headers.get(LAUNCH_HEADER)?.trim() || '';
   const idempotencyCapability = request.headers.get(IDEMPOTENCY_HEADER)?.trim() || '';
   if (!callSessionId) {
-    return NextResponse.json(
-      { code: 'unknown', message: 'A valid callSessionId is required.', retryable: false },
-      { status: 400, headers: responseHeaders() }
-    );
+    return failure('unknown', 'A valid callSessionId is required.', false, 400);
   }
   if (!SAFE_CAPABILITY.test(launchCapability) || !SAFE_CAPABILITY.test(idempotencyCapability)) {
-    return NextResponse.json(
-      { code: 'auth_expired', message: 'The call link is missing or invalid.', retryable: false },
-      { status: 401, headers: responseHeaders() }
-    );
+    return failure('auth_expired', 'The call link is missing or invalid.', false, 401);
   }
-  const origin = process.env.VIVENTIUM_LIBRECHAT_ORIGIN;
-  const secret = process.env.VIVENTIUM_CALL_SESSION_SECRET;
-  if (!origin || !secret) {
-    return NextResponse.json(
-      { code: 'gateway_down', message: 'Calling is not configured.', retryable: true },
-      { status: 503, headers: responseHeaders() }
-    );
+
+  const outcome = await coreRequest({
+    path: corePaths.browserCapabilityExchange(callSessionId),
+    method: 'POST',
+    // Bearers travel only in their dedicated headers; this Core route takes no body.
+    headers: {
+      [LAUNCH_HEADER]: launchCapability,
+      [IDEMPOTENCY_HEADER]: idempotencyCapability,
+    },
+    jsonContentType: false,
+    redirect: 'error',
+    cancelWith: request.signal,
+    readBody: readCoreText(() => ({})),
+  });
+  if (outcome.kind === 'unconfigured') {
+    return failure('gateway_down', 'Calling is not configured.', true, 503);
   }
-  const configuredTimeout = Number(process.env.VIVENTIUM_CALL_PROXY_TIMEOUT_MS);
-  const timeoutMs =
-    Number.isFinite(configuredTimeout) && configuredTimeout >= 1 && configuredTimeout <= 60_000
-      ? configuredTimeout
-      : 4_500;
-  const controller = new AbortController();
-  const cancelUpstream = () => controller.abort();
-  request.signal.addEventListener('abort', cancelUpstream, { once: true });
-  let timedOut = false;
-  const timeoutId = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, timeoutMs);
-  try {
-    if (request.signal.aborted) {
-      controller.abort();
-      throw new Error('Request aborted');
-    }
-    const target = new URL(
-      `/api/viventium/calls/${encodeURIComponent(callSessionId)}/browser-capability/exchange`,
-      origin
-    );
-    const response = await fetch(target.toString(), {
-      method: 'POST',
-      headers: {
-        'X-VIVENTIUM-CALL-SECRET': secret,
-        [LAUNCH_HEADER]: launchCapability,
-        [IDEMPOTENCY_HEADER]: idempotencyCapability,
-      },
-      cache: 'no-store',
-      redirect: 'error',
-      signal: controller.signal,
+  if (outcome.kind === 'timeout') {
+    return failure('gateway_down', 'Calling timed out. Please try again.', true, 504);
+  }
+  if (outcome.kind === 'unreachable') {
+    return failure('gateway_down', 'Calling is temporarily unavailable.', true, 503);
+  }
+  if (!outcome.ok) {
+    return NextResponse.json(normalizeProxyFailure(outcome.status, outcome.payload ?? {}), {
+      status: outcome.status,
+      headers: RESPONSE_HEADERS,
     });
-    const text = await response.text();
-    let payload: unknown = {};
-    if (text) {
-      try {
-        payload = JSON.parse(text);
-      } catch {
-        payload = {};
-      }
-    }
-    if (!response.ok) {
-      return NextResponse.json(normalizeProxyFailure(response.status, payload), {
-        status: response.status,
-        headers: responseHeaders(),
-      });
-    }
-    const value =
-      payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {};
-    if (
-      value.version !== 1 ||
-      value.callSessionId !== callSessionId ||
-      typeof value.browserCapability !== 'string' ||
-      !SAFE_CAPABILITY.test(value.browserCapability)
-    ) {
-      return NextResponse.json(
-        { code: 'gateway_down', message: 'The call launch response was invalid.', retryable: true },
-        { status: 503, headers: responseHeaders() }
-      );
-    }
-    return NextResponse.json(
-      {
-        version: 1,
-        callSessionId,
-        browserCapability: value.browserCapability,
-        ...(typeof value.expiresAt === 'string' ? { expiresAt: value.expiresAt } : {}),
-      },
-      { headers: responseHeaders() }
-    );
-  } catch {
-    return NextResponse.json(
-      {
-        code: 'gateway_down',
-        message: timedOut
-          ? 'Calling timed out. Please try again.'
-          : 'Calling is temporarily unavailable.',
-        retryable: true,
-      },
-      { status: timedOut ? 504 : 503, headers: responseHeaders() }
-    );
-  } finally {
-    clearTimeout(timeoutId);
-    request.signal.removeEventListener('abort', cancelUpstream);
   }
+
+  const value =
+    outcome.payload && typeof outcome.payload === 'object'
+      ? (outcome.payload as Record<string, unknown>)
+      : {};
+  if (
+    value.version !== 1 ||
+    value.callSessionId !== callSessionId ||
+    typeof value.browserCapability !== 'string' ||
+    !SAFE_CAPABILITY.test(value.browserCapability)
+  ) {
+    return failure('gateway_down', 'The call launch response was invalid.', true, 503);
+  }
+  return NextResponse.json(
+    {
+      version: 1,
+      callSessionId,
+      browserCapability: value.browserCapability,
+      ...(typeof value.expiresAt === 'string' ? { expiresAt: value.expiresAt } : {}),
+    },
+    { headers: RESPONSE_HEADERS }
+  );
 }

@@ -1,11 +1,8 @@
 import React from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
-import {
-  CallActivity,
-  LatestSpeakerCaption,
-  SpeakerTranscript,
-} from '@/components/app/call-activity';
+import { CallActivity } from '@/components/app/call-activity';
+import { LatestSpeakerCaption, SpeakerTranscript } from '@/components/app/speaker-transcript';
 import {
   type SpeakerSegmentV1,
   type VoiceTaskEventV1,
@@ -457,7 +454,7 @@ describe('SpeakerTranscript', () => {
     expect(liveRegion).toHaveTextContent('Unknown · overlapping · Revised words.');
   });
 
-  it('automatically windows more than four thousand segments while preserving full scroll access', () => {
+  it('lists every retained segment, more than four thousand, in order with its position', () => {
     const segments = Array.from({ length: 4_096 }, (_, index) =>
       segment({
         segmentId: `segment-${index}`,
@@ -467,52 +464,37 @@ describe('SpeakerTranscript', () => {
         text: `Synthetic speaker segment ${index}`,
       })
     );
-    const scrollContainerRef = React.createRef<HTMLDivElement>();
-    render(
-      <div ref={scrollContainerRef}>
-        <SpeakerTranscript segments={segments} scrollContainerRef={scrollContainerRef} />
-      </div>
-    );
+    const { rerender } = render(<SpeakerTranscript segments={segments} />);
 
-    const container = scrollContainerRef.current!;
     const transcript = screen.getByRole('list', { name: 'Speaker transcript' });
-    const rect = (top: number, bottom: number) => ({
-      top,
-      bottom,
-      left: 0,
-      right: 500,
-      width: 500,
-      height: bottom - top,
-      x: 0,
-      y: top,
-      toJSON: () => ({}),
-    });
-    vi.spyOn(container, 'getBoundingClientRect').mockImplementation(() => rect(0, 600));
-    const transcriptRect = vi
-      .spyOn(transcript, 'getBoundingClientRect')
-      .mockImplementation(() => rect(20, 580));
+    const rows = transcript.querySelectorAll('li');
+    expect(rows).toHaveLength(4_096);
+    expect(rows[0]).toHaveTextContent('Synthetic speaker segment 0');
+    expect(rows[0]).toHaveAttribute('aria-posinset', '1');
+    expect(rows[0]).toHaveAttribute('aria-setsize', '4096');
+    expect(rows[4_095]).toHaveTextContent('Synthetic speaker segment 4095');
+    // Rows off screen are left to the browser to skip.
+    expect(rows[0].className).toContain('[content-visibility:auto]');
 
-    expect(screen.getByText('Synthetic speaker segment 4095')).toBeVisible();
-    expect(screen.queryByText('Synthetic speaker segment 0')).not.toBeInTheDocument();
-    expect(transcript.querySelectorAll('li')).toHaveLength(160);
+    // A revision of one segment changes that row in place.
+    const firstRow = rows[0];
+    rerender(
+      <SpeakerTranscript
+        segments={[
+          { ...segments[0], revision: 2, text: 'Revised first segment' },
+          ...segments.slice(1),
+        ]}
+      />
+    );
+    expect(transcript.querySelectorAll('li')[0]).toBe(firstRow);
+    expect(firstRow).toHaveTextContent('Revised first segment');
+    expect(firstRow).toHaveTextContent('Updated');
+  });
 
-    for (let index = 0; index < 34; index += 1) {
-      fireEvent.scroll(container);
-    }
-
-    expect(screen.getByText('Synthetic speaker segment 0')).toBeVisible();
-    expect(transcript.querySelectorAll('li').length).toBeLessThanOrEqual(512);
-    expect(transcript.querySelector('li')).toHaveAttribute('aria-setsize', '4096');
-    expect(transcript.querySelector('li')).toHaveAttribute('aria-posinset', '1');
-
-    transcriptRect.mockImplementation(() => rect(-500, 580));
-    for (let index = 0; index < 34; index += 1) {
-      fireEvent.scroll(container);
-    }
-
-    expect(screen.getByText('Synthetic speaker segment 4095')).toBeVisible();
-    expect(screen.queryByText('Synthetic speaker segment 0')).not.toBeInTheDocument();
-    expect(transcript.querySelectorAll('li').length).toBeLessThanOrEqual(512);
+  it('says when earlier or later speech is being loaded', () => {
+    render(<SpeakerTranscript segments={[segment()]} loadingOlder loadingNewer />);
+    expect(screen.getByText('Loading earlier speakers…')).toBeVisible();
+    expect(screen.getByText('Loading newer speakers…')).toBeVisible();
   });
 });
 

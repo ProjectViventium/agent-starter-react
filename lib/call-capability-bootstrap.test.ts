@@ -2,6 +2,26 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CALL_CAPABILITY_BOOTSTRAP_SCRIPT } from '@/lib/call-capability-bootstrap';
 
 describe('pre-hydration call capability bootstrap', () => {
+  it.each(['.', '..'])('rejects dot-segment call %s before storage or exchange', (callId) => {
+    const fakeWindow = {
+      location: {
+        search: `?callSessionId=${callId}&autoConnect=1`,
+        hash: `#viventiumCallCapability=${'B'.repeat(43)}`,
+        pathname: '/call-bootstrap',
+        replace: vi.fn(),
+      },
+      history: { state: null, replaceState: vi.fn() },
+      sessionStorage: { setItem: vi.fn() },
+      fetch: vi.fn(),
+    };
+    new Function('window', 'document', CALL_CAPABILITY_BOOTSTRAP_SCRIPT)(fakeWindow, {
+      referrer: 'https://chat.example.test',
+    });
+    expect(fakeWindow.location.replace).toHaveBeenCalledWith('/');
+    expect(fakeWindow.sessionStorage.setItem).not.toHaveBeenCalled();
+    expect(fakeWindow.fetch).not.toHaveBeenCalled();
+  });
+
   it('preserves the settings entry without opening the microphone', () => {
     const replace = vi.fn();
     const fakeWindow = {

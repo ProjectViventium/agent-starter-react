@@ -18,6 +18,7 @@ const MAX_CLOCK_SKEW_MS = 5_000;
 const MAX_TRACKED_TURNS = 256;
 const MAX_SEGMENT_IDS = 32;
 const MAX_PUBLICATION_ATTEMPTS = 3;
+const STORED_TURN_RETRY_DELAY_MS = 400;
 const PUBLICATION_RETRY_DELAY_MS = 75;
 const BASE64URL_SHA256 = /^[A-Za-z0-9_-]{43}$/;
 const VERDICT_FIELDS = new Set([
@@ -419,20 +420,31 @@ export function useWingEngagement({
           await publishSignedVerdict(pending);
           return;
         }
-        const response = await fetch('/api/call-engagement', {
-          method: 'POST',
-          cache: 'no-store',
-          headers: {
-            'Content-Type': 'application/json',
-            ...browserCapabilityHeaders,
-          },
-          body: JSON.stringify({
-            version: 1,
-            callSessionId,
-            turnId: speakerSegment.turnId,
-          }),
-          signal: controller.signal,
-        });
+        const classify = () =>
+          fetch('/api/call-engagement', {
+            method: 'POST',
+            cache: 'no-store',
+            headers: {
+              'Content-Type': 'application/json',
+              ...browserCapabilityHeaders,
+            },
+            body: JSON.stringify({
+              version: 1,
+              callSessionId,
+              turnId: speakerSegment.turnId,
+            }),
+            signal: controller.signal,
+          });
+        let response = await classify();
+        if (response.status === 403 && !disposed && !controller.signal.aborted) {
+          // The final segment reaches this page a few tens of milliseconds before the gateway has
+          // stored it, and the backend refuses a turn it cannot read yet. Ask once more, shortly.
+          await new Promise((resolve) => window.setTimeout(resolve, STORED_TURN_RETRY_DELAY_MS));
+          if (disposed || controller.signal.aborted) {
+            return;
+          }
+          response = await classify();
+        }
         if (!response.ok || disposed || controller.signal.aborted) {
           return;
         }

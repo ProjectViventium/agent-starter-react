@@ -13,7 +13,8 @@ export type CallIssue = {
   retryable?: boolean;
 };
 
-const CALL_ISSUE_CODES = new Set<CallIssueKind>([
+/** The one error vocabulary of the call page: BFF error bodies, hooks and UI all use it. */
+export const CALL_ISSUE_KINDS: readonly CallIssueKind[] = [
   'auth_expired',
   'mic_denied',
   'microphone_missing',
@@ -21,7 +22,9 @@ const CALL_ISSUE_CODES = new Set<CallIssueKind>([
   'gateway_down',
   'provider_failure',
   'unknown',
-]);
+];
+
+const CALL_ISSUE_CODES = new Set<CallIssueKind>(CALL_ISSUE_KINDS);
 
 export class CallRequestError extends Error {
   readonly code: CallIssueKind;

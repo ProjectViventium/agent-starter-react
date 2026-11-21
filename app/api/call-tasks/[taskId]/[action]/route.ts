@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { proxyCallTaskRequest } from '@/app/api/call-tasks/proxy';
+import { corePaths, proxyCallTaskRequest } from '@/app/api/call-tasks/proxy';
 import { readRequestCallBrowserCapability } from '@/lib/call-browser-capability';
 import { parseCallIdentifier, parseTaskInput } from '@/lib/call-proxy';
 
@@ -48,7 +48,7 @@ export async function POST(
     );
   }
   return proxyCallTaskRequest(
-    `/api/viventium/voice/tasks/${encodeURIComponent(taskId)}/${action}`,
+    corePaths.taskAction(taskId, action),
     'POST',
     callSessionId,
     browserCapability,
