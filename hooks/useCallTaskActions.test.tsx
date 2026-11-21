@@ -14,15 +14,20 @@ describe('useCallTaskActions', () => {
     const logs = (['debug', 'info', 'log', 'warn', 'error'] as const).map((level) =>
       vi.spyOn(console, level).mockImplementation(() => undefined)
     );
-    const fetchMock = vi.fn().mockRejectedValue(
-      new TypeError('synthetic-private-error qa@example.test bearer synthetic-private-token')
-    );
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValue(
+        new TypeError('synthetic-private-error qa@example.test bearer synthetic-private-token')
+      );
     vi.stubGlobal('fetch', fetchMock);
     const { result } = renderHook(() => useCallTaskActions('synthetic-private-call'));
     try {
       await act(async () => {
         expect(
-          await result.current.submitInput('synthetic-private-task', 'Synthetic private task input.')
+          await result.current.submitInput(
+            'synthetic-private-task',
+            'Synthetic private task input.'
+          )
         ).toBe(false);
       });
       expect(fetchMock).toHaveBeenCalledOnce();
