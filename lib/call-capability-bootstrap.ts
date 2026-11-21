@@ -4,7 +4,7 @@
  * VIVENTIUM END */
 export const CALL_CAPABILITY_BOOTSTRAP_SCRIPT = `(function(){
 var i='',c='',l='',n='',p='',b='',d='',j='';
-var si=/^[A-Za-z0-9._:-]{1,160}$/;
+var si=/^(?![.]{1,2}$)[A-Za-z0-9._:-]{1,160}$/;
 var sc=/^[A-Za-z0-9_-]{43}$/;
 function go(){window.location.replace(d);}
 function randomCapability(){if(!window.crypto||typeof window.crypto.getRandomValues!=='function'||typeof window.btoa!=='function')return '';var a=new Uint8Array(32);window.crypto.getRandomValues(a);var s='';for(var x=0;x<a.length;x+=1)s+=String.fromCharCode(a[x]);return window.btoa(s).split('+').join('-').split('/').join('_').replace(/=+$/,'');}

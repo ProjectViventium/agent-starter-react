@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { proxyCallTaskRequest } from '@/app/api/call-tasks/proxy';
+import { corePaths, proxyCallTaskRequest } from '@/app/api/call-tasks/proxy';
 import { readRequestCallBrowserCapability } from '@/lib/call-browser-capability';
 import { parseCallIdentifier } from '@/lib/call-proxy';
 
@@ -40,7 +40,7 @@ export async function GET(request: Request) {
     ? `&beforeCreatedAt=${encodeURIComponent(parsedBeforeCreatedAt!.toISOString())}&beforeTaskId=${encodeURIComponent(beforeTaskId!)}`
     : '';
   return proxyCallTaskRequest(
-    `/api/viventium/voice/tasks?callSessionId=${encodeURIComponent(callSessionId)}${cursor}`,
+    corePaths.tasks(callSessionId, cursor),
     'GET',
     callSessionId,
     browserCapability

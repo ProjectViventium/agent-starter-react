@@ -1,9 +1,9 @@
-import React from 'react';
 import { CallIssueNotice } from '@/components/app/call-issue-notice';
 import { CallStatusIndicator } from '@/components/app/call-mode-control';
-import { Button } from '@/components/livekit/button';
+import { Button } from '@/components/ui/button';
 import type { VoiceCallMode } from '@/hooks/useCallSessionState';
 import type { CallIssue } from '@/lib/call-start';
+import { VIVENTIUM_CONFIG } from '@/lib/viventium/config';
 
 function WelcomeImage() {
   return (
@@ -27,13 +27,17 @@ interface WelcomeViewProps {
   startButtonText: string;
   onStartCall: () => void;
   startDisabled?: boolean;
+  /** One quiet line under the button (what the page is waiting for, or why it cannot start). */
   helperText?: string;
   callIssue?: CallIssue | null;
   onRetry?: () => void;
   callEnded?: boolean;
   mode?: VoiceCallMode;
+  /** The voice picker button, shown under the Start button. */
+  picker?: React.ReactNode;
 }
 
+/** The start screen (CP-CMP-014): upstream's welcome view with Viventium's wording and states. */
 export const WelcomeView = ({
   startButtonText,
   onStartCall,
@@ -43,60 +47,57 @@ export const WelcomeView = ({
   onRetry,
   callEnded = false,
   mode = 'call',
+  picker,
   ref,
 }: React.ComponentProps<'div'> & WelcomeViewProps) => {
   return (
     <div ref={ref}>
-      <section className="bg-background flex flex-col items-center px-4 pt-10 pb-10 text-center md:pt-14 md:pb-12">
+      <section className="bg-background flex flex-col items-center justify-center px-4 text-center">
         <WelcomeImage />
 
-        <p className="text-foreground max-w-prose pt-2 text-[clamp(1.5rem,2.5vw,2.25rem)] leading-tight font-medium tracking-[-0.03em]">
+        <p className="text-foreground max-w-prose pt-1 text-[clamp(1.5rem,2.5vw,2.25rem)] leading-tight font-medium tracking-[-0.03em]">
           Chat live with Viventium
         </p>
 
         {callEnded ? <CallStatusIndicator status="ended" mode={mode} className="mt-4" /> : null}
 
         <Button
-          variant="primary"
           size="lg"
           onClick={onStartCall}
           disabled={startDisabled}
-          className="mt-6 w-64 font-mono"
+          className="mt-6 w-64 rounded-full font-mono text-xs font-bold tracking-wider uppercase"
         >
           {startButtonText}
         </Button>
+
+        {picker ? <div className="mt-4">{picker}</div> : null}
 
         {helperText ? (
           <p className="text-muted-foreground mt-4 max-w-md text-sm leading-6">{helperText}</p>
         ) : null}
 
-        {/* A durable terminal state is authoritative after refresh. Do not overlay a stale
-         * launch or voice-settings error on a call that is already confirmed ended. */}
+        {/* An ended call stays ended after a reload: no stale start problem is laid over it. */}
         {callIssue && !callEnded ? (
           <div className="mt-4 w-full max-w-md">
             <CallIssueNotice issue={callIssue} onRetry={onRetry} />
           </div>
         ) : null}
-
-        <div className="mt-8 flex w-full items-center justify-center px-4">
-          <p className="text-muted-foreground max-w-prose pt-1 text-xs leading-5 font-normal text-pretty md:text-sm">
-            {/* VIVENTIUM START
-             * Purpose: Replace upstream docs links with Viventium.AI.
-             * Details: docs/requirements_and_learnings/16_Branding_and_Assets.md#agent-starter-help-links
-             * VIVENTIUM END */}
-            Need help getting set up? Visit{' '}
-            <a
-              target="_blank"
-              rel="noopener noreferrer"
-              href="https://viventium.ai"
-              className="underline"
-            >
-              Viventium.AI
-            </a>
-            .
-          </p>
-        </div>
       </section>
+
+      <div className="fixed bottom-5 left-0 flex w-full items-center justify-center px-4">
+        <p className="text-muted-foreground max-w-prose pt-1 text-xs leading-5 font-normal text-pretty md:text-sm">
+          Need help getting set up? Visit{' '}
+          <a
+            target="_blank"
+            rel="noopener noreferrer"
+            href={VIVENTIUM_CONFIG.siteUrl}
+            className="underline"
+          >
+            {VIVENTIUM_CONFIG.siteLinkLabel}
+          </a>
+          .
+        </p>
+      </div>
     </div>
   );
 };

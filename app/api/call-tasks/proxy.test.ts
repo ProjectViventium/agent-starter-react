@@ -10,6 +10,27 @@ afterEach(() => {
 });
 
 describe('call task server proxy', () => {
+  it.each(['.', '..'])('rejects dot-segment task %s without contacting Core', async (taskId) => {
+    process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'https://core.example.test';
+    process.env.VIVENTIUM_CALL_SESSION_SECRET = 'synthetic-secret';
+    const upstream = vi.fn(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', upstream);
+    const { POST } = await import('@/app/api/call-tasks/[taskId]/[action]/route');
+    const response = await POST(
+      new Request('https://voice.example.test/api/call-tasks/synthetic/cancel', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-VIVENTIUM-CALL-CAPABILITY': 'A'.repeat(43),
+        },
+        body: JSON.stringify({ callSessionId: 'synthetic-call' }),
+      }),
+      { params: Promise.resolve({ taskId, action: 'cancel' }) }
+    );
+    expect(response.status).toBe(400);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
   it('injects the secret and exact authenticated call session', async () => {
     process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'https://librechat.example.com';
     process.env.VIVENTIUM_CALL_SESSION_SECRET = 'server-secret';
@@ -29,7 +50,7 @@ describe('call task server proxy', () => {
     );
 
     expect(fetchMock).toHaveBeenCalledWith(
-      new URL('https://librechat.example.com/api/viventium/voice/tasks?callSessionId=call-1'),
+      'https://librechat.example.com/api/viventium/voice/tasks?callSessionId=call-1',
       expect.objectContaining({
         headers: expect.objectContaining({
           'X-VIVENTIUM-CALL-SECRET': 'server-secret',

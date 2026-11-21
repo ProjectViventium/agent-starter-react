@@ -1,34 +1,20 @@
-import { CALL_CAPABILITY_HEADER } from '@/lib/call-browser-capability';
+/*
+ * Authoritative call session for token minting (CP-HL-026, server side only).
+ *
+ * The browser never chooses its room, identity or agent: the token route fetches the canonical
+ * call record from Core and overwrites whatever the browser sent with it.
+ */
+import { corePaths, coreRequest, readCoreJson } from '@/app/api/call-tasks/proxy';
 import { normalizeProxyFailure, parseCallIdentifier } from '@/lib/call-proxy';
 import type { CallIssueKind } from '@/lib/call-start';
+import { VOICE_CALL_STATUSES, type VoiceCallStatus } from '@/lib/call-state';
 
 type AuthoritativeVoiceRoute = {
   stt: { provider: string; variant: string | null };
   tts: { provider: string; variant: string | null };
 };
 
-export type AuthoritativeCallStatus =
-  | 'created'
-  | 'connecting'
-  | 'listening'
-  | 'speaking'
-  | 'working'
-  | 'needs_input'
-  | 'degraded'
-  | 'failed'
-  | 'ended';
-
-const AUTHORITATIVE_CALL_STATUSES = new Set<AuthoritativeCallStatus>([
-  'created',
-  'connecting',
-  'listening',
-  'speaking',
-  'working',
-  'needs_input',
-  'degraded',
-  'failed',
-  'ended',
-]);
+export type AuthoritativeCallStatus = VoiceCallStatus;
 
 export type AuthoritativeCallSession = {
   callSessionId: string;
@@ -71,9 +57,8 @@ function boundedCanonicalString(value: unknown, maximum = 200): string | null {
 }
 
 function normalizeAuthoritativeCallStatus(value: unknown): AuthoritativeCallStatus | null {
-  return typeof value === 'string' &&
-    AUTHORITATIVE_CALL_STATUSES.has(value as AuthoritativeCallStatus)
-    ? (value as AuthoritativeCallStatus)
+  return typeof value === 'string' && VOICE_CALL_STATUSES.includes(value as VoiceCallStatus)
+    ? (value as VoiceCallStatus)
     : null;
 }
 
@@ -126,21 +111,21 @@ function normalizeAuthoritativeCallSession(
     : null;
 }
 
-function canonicalRequestTimeoutMs() {
-  const configured = Number(process.env.VIVENTIUM_CALL_SESSION_VOICE_SETTINGS_TIMEOUT_MS);
-  return Number.isFinite(configured) && configured >= 1 && configured <= 60_000
-    ? configured
-    : 5_000;
-}
-
 export async function fetchAuthoritativeCallSession(
   callSessionId: string,
   browserCapability: string
 ): Promise<AuthoritativeCallSession> {
   const validCallSessionId = parseCallIdentifier(callSessionId);
-  const origin = process.env.VIVENTIUM_LIBRECHAT_ORIGIN;
-  const secret = process.env.VIVENTIUM_CALL_SESSION_SECRET;
-  if (!validCallSessionId || !origin || !secret) {
+  const outcome = validCallSessionId
+    ? await coreRequest({
+        path: corePaths.callState(validCallSessionId),
+        method: 'GET',
+        browserCapability,
+        sessionHeader: validCallSessionId,
+        readBody: readCoreJson,
+      })
+    : ({ kind: 'unconfigured' } as const);
+  if (!validCallSessionId || outcome.kind === 'unconfigured') {
     throw new AuthoritativeCallSessionError(
       'gateway_down',
       'The signed call-session runtime is not configured.',
@@ -148,37 +133,8 @@ export async function fetchAuthoritativeCallSession(
       false
     );
   }
-  const controller = new AbortController();
-  let timedOut = false;
-  const timeoutId = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, canonicalRequestTimeoutMs());
-  let response: Response;
-  let payload: unknown;
-  try {
-    response = await fetch(
-      new URL(
-        `/api/viventium/calls/${encodeURIComponent(validCallSessionId)}/state`,
-        origin
-      ).toString(),
-      {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-VIVENTIUM-CALL-SECRET': secret,
-          'X-VIVENTIUM-CALL-SESSION': validCallSessionId,
-          [CALL_CAPABILITY_HEADER]: browserCapability,
-        },
-        cache: 'no-store',
-        signal: controller.signal,
-      }
-    );
-    payload = await response.json().catch((error: unknown) => {
-      if (controller.signal.aborted) throw error;
-      return null;
-    });
-  } catch {
+  if (outcome.kind !== 'response') {
+    const timedOut = outcome.kind === 'timeout';
     throw new AuthoritativeCallSessionError(
       'gateway_down',
       timedOut
@@ -187,15 +143,14 @@ export async function fetchAuthoritativeCallSession(
       timedOut ? 504 : 503,
       true
     );
-  } finally {
-    clearTimeout(timeoutId);
   }
-  if (!response.ok) {
-    const failure = normalizeProxyFailure(response.status, payload);
+  const payload = outcome.payload;
+  if (!outcome.ok) {
+    const failure = normalizeProxyFailure(outcome.status, payload);
     throw new AuthoritativeCallSessionError(
       failure.code,
       failure.message,
-      response.status,
+      outcome.status,
       failure.retryable
     );
   }

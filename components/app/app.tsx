@@ -1,883 +1,268 @@
 'use client';
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import {
-  ConnectionState,
-  type LocalTrack,
-  RoomEvent,
-  TokenSource,
-  type TokenSourceConfigurable,
-  type TokenSourceFetchOptions,
-  type TokenSourceFixed,
-} from 'livekit-client';
-import { RoomAudioRenderer, SessionProvider, useSession } from '@livekit/components-react';
-import type { AppConfig } from '@/app-config';
-// VIVENTIUM START: Keep per-call voice route settings visible across the call lifecycle.
-import {
-  AdvancedVoiceSettings,
-  ConnectedAdvancedVoiceSettings,
-} from '@/components/app/advanced-voice-settings';
-// VIVENTIUM END
+/*
+ * The Viventium call page (CP-CMP-001 … 010).
+ *
+ * Upstream's `App` with what a Viventium call needs around it:
+ * - the page is opened for one call: the link is read and cleaned before anything is shown;
+ * - the token comes from the page's own server with the per-call capability (`lib/call-token-source`);
+ * - the session is created only once a start is asked for. `useSession` fetches a token as soon
+ *   as it mounts, and for a signed call that already attaches a voice worker, so a page that is
+ *   merely open (manual start) must not mount it;
+ * - one owner of the server's call record (mode, ended) for the start screen and the live call.
+ */
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
+import { ConnectionState } from 'livekit-client';
+import { MotionConfig } from 'motion/react';
+import { useSession } from '@livekit/components-react';
+import { WarningIcon } from '@phosphor-icons/react/dist/ssr';
+import { AgentSessionProvider } from '@/components/agents-ui/agent-session-provider';
+import { VoiceAudioPlaybackEvidence } from '@/components/app/audio-playback-evidence';
+import { type CallContextValue, CallProvider } from '@/components/app/call-context';
 import { LinkedChatLink } from '@/components/app/linked-chat-link';
-import { ViewController } from '@/components/app/view-controller';
+import { type StartScreenState, ViewController } from '@/components/app/view-controller';
+import { CallVoicePicker, VoicePicker } from '@/components/app/voice-picker';
 import { WelcomeView } from '@/components/app/welcome-view';
-import { Toaster } from '@/components/livekit/toaster';
-import { VoiceAudioPlaybackEvidence } from '@/components/livekit/voice-audio-playback-evidence';
+import { Toaster } from '@/components/ui/sonner';
 import { useAgentErrors } from '@/hooks/useAgentErrors';
 import { type UseCallSessionStateResult, useCallSessionState } from '@/hooks/useCallSessionState';
-// VIVENTIUM START: Share the exact loaded settings with the connected call surface.
 import {
   type UseCallSessionVoiceSettingsResult,
   useCallSessionVoiceSettings,
 } from '@/hooks/useCallSessionVoiceSettings';
-// VIVENTIUM END
+import { CALL_AGENT_CONNECT_TIMEOUT_MS, useCallStart } from '@/hooks/useCallStart';
+import { useCallStatePublish } from '@/hooks/useCallStatePublish';
 import { useConnectionRecovery } from '@/hooks/useConnectionRecovery';
 import { useDebugMode } from '@/hooks/useDebug';
-import {
-  type DeviceSoundMode,
-  type DeviceSoundSettings,
-  useDeviceSoundMode,
-} from '@/hooks/useDeviceSoundMode';
-import { buildFallbackVoiceRoute } from '@/hooks/useVoiceRoute';
+import { type DeviceSoundSettings, useDeviceSoundMode } from '@/hooks/useDeviceSoundMode';
 import { useWakeLock } from '@/hooks/useWakeLock';
-import {
-  callBrowserCapabilityHeaders,
-  captureCallBrowserCapability,
-} from '@/lib/call-browser-capability';
-import {
-  type CallIssue,
-  CallRequestError,
-  callIssueFromResponse,
-  classifyCallIssue,
-  readCallDeepLink,
-} from '@/lib/call-start';
-import { publishVoiceCallState } from '@/lib/call-state';
-import { deviceSoundCaptureOptions, verifyDeviceSoundCapture } from '@/lib/device-sound-mode';
-import {
-  enableCallMicrophone,
-  queryMicrophonePermissionState,
-  readCallMicrophoneEnabled,
-} from '@/lib/microphone-start';
-import { getSandboxTokenSource, shouldUseSandboxTokenSource } from '@/lib/utils';
+import { captureCallBrowserCapability } from '@/lib/call-browser-capability';
+import { type CallDeepLink, type CallIssue, readCallDeepLink } from '@/lib/call-start';
+import { type CallTokenSource, createCallTokenSource } from '@/lib/call-token-source';
+import { VIVENTIUM_CONFIG } from '@/lib/viventium/config';
 
 const IN_DEVELOPMENT = process.env.NODE_ENV !== 'production';
 
-function AppSetup({ onSessionFailure }: { onSessionFailure: () => void }) {
-  useDebugMode({ enabled: IN_DEVELOPMENT });
-  useAgentErrors(onSessionFailure);
+const ENDED_TEXT = 'Call ended. Any active work is continuing in your linked Viventium chat.';
+const INSECURE_PAGE_TEXT =
+  'This address cannot be used for a call. Open Viventium on this Mac (localhost), or use a secure (https) address.';
 
-  return null;
-}
-
-interface AppProps {
-  appConfig: AppConfig;
-}
-
-type AgentTokenOptions = TokenSourceFetchOptions & {
-  agentName?: string;
-  agentMetadata?: string;
-  participantMetadata?: string;
-  reclaimDispatch?: boolean;
-};
-
-const VIVENTIUM_CALL_AGENT_CONNECT_TIMEOUT_MS = 90_000;
-const CONNECTION_DETAILS_RETRY_MS = 1500;
-const CONNECTION_DETAILS_MAX_ATTEMPTS = 2;
-const CONNECTION_DETAILS_CACHE_MS = 2_000;
-const START_LATCH_WATCHDOG_MS = 1_000;
-const MICROPHONE_START_TIMEOUT_MS = 15_000;
-const DISPATCH_RECLAIM_AFTER_MS = 8_000;
-const DISPATCH_RECLAIM_RETRY_MS = 8_000;
-const DISPATCH_RECLAIM_MAX_ATTEMPTS = 3;
-const CALL_END_TOKEN_REUSE_MS = 30_000;
-const SAFE_CALL_SESSION_ID = /^[A-Za-z0-9._:-]{1,160}$/;
-
-type ConnectionDetailsCacheEntry = {
-  promise?: Promise<ConnectionDetails>;
-  value?: ConnectionDetails;
-  createdAt: number;
-};
-
-const connectionDetailsCache = new Map<string, ConnectionDetailsCacheEntry>();
-const locallyEndingCallSessions = new Map<string, number>();
-const canonicalConnectionDetails = new Map<
-  string,
-  Pick<ConnectionDetails, 'roomName' | 'participantIdentity'>
->();
-const MAX_CANONICAL_CONNECTION_SESSIONS = 128;
-
-type ConnectionDetails = {
-  serverUrl: string;
-  roomName: string;
-  participantToken: string;
-  participantName?: string;
-  participantIdentity?: string;
-};
-
-function callSessionIdFromOptions(options: AgentTokenOptions): string | null {
-  if (typeof options.agentMetadata !== 'string') {
-    return null;
-  }
-  try {
-    const metadata = JSON.parse(options.agentMetadata) as { callSessionId?: unknown };
-    return typeof metadata.callSessionId === 'string' && metadata.callSessionId.trim()
-      ? metadata.callSessionId.trim()
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function validateConnectionDetails(
-  payload: unknown,
-  options: AgentTokenOptions
-): ConnectionDetails {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    throw new CallRequestError({
-      kind: 'gateway_down',
-      message: 'The voice runtime returned invalid connection details.',
-    });
-  }
-  const value = payload as Record<string, unknown>;
-  if (
-    typeof value.serverUrl !== 'string' ||
-    !value.serverUrl.trim() ||
-    typeof value.roomName !== 'string' ||
-    !value.roomName.trim() ||
-    typeof value.participantToken !== 'string' ||
-    !value.participantToken.trim()
-  ) {
-    throw new CallRequestError({
-      kind: 'gateway_down',
-      message: 'The voice runtime returned incomplete connection details.',
-    });
-  }
-  const details: ConnectionDetails = {
-    serverUrl: value.serverUrl,
-    roomName: value.roomName,
-    participantToken: value.participantToken,
-    ...(typeof value.participantName === 'string'
-      ? { participantName: value.participantName }
-      : {}),
-    ...(typeof value.participantIdentity === 'string'
-      ? { participantIdentity: value.participantIdentity }
-      : {}),
-  };
-  const callSessionId = callSessionIdFromOptions(options);
-  if (!callSessionId) {
-    return details;
-  }
-  if (options.roomName && options.roomName !== details.roomName) {
-    throw new CallRequestError({
-      kind: 'auth_expired',
-      message: 'The signed call session does not match the connected room.',
-    });
-  }
-  if (!details.participantIdentity) {
-    throw new CallRequestError({
-      kind: 'auth_expired',
-      message: 'The signed call session returned no stable owner identity.',
-    });
-  }
-  const prior = canonicalConnectionDetails.get(callSessionId);
-  if (
-    prior &&
-    (prior.roomName !== details.roomName ||
-      prior.participantIdentity !== details.participantIdentity)
-  ) {
-    throw new CallRequestError({
-      kind: 'auth_expired',
-      message: 'The signed call identity changed during reconnect.',
-    });
-  }
-  canonicalConnectionDetails.delete(callSessionId);
-  canonicalConnectionDetails.set(callSessionId, {
-    roomName: details.roomName,
-    participantIdentity: details.participantIdentity,
-  });
-  while (canonicalConnectionDetails.size > MAX_CANONICAL_CONNECTION_SESSIONS) {
-    const oldest = canonicalConnectionDetails.keys().next();
-    if (oldest.done) break;
-    canonicalConnectionDetails.delete(oldest.value);
-  }
-  return details;
-}
-
-function isLoopbackHost(hostname: string | null | undefined): boolean {
-  const normalized = (hostname ?? '')
+function isLoopbackHost(hostname: string): boolean {
+  const normalized = hostname
     .trim()
     .replace(/^\[(.*)\]$/, '$1')
     .toLowerCase();
   return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1';
 }
 
-function buildCallSessionMetadata(callSessionId: string) {
-  return JSON.stringify({ callSessionId });
+/**
+ * What the start screen shows (CP-CMP-009), from everything known about the call. Voice
+ * settings that are still loading or failed to load never block Start: the server decides.
+ */
+export function deriveStartScreen({
+  hasCall,
+  hasAgent,
+  insecurePage,
+  settings,
+  callState,
+  starting = false,
+  microphoneStarting = false,
+  startError = null,
+  endedHere = false,
+}: {
+  hasCall: boolean;
+  hasAgent: boolean;
+  insecurePage: boolean;
+  settings: Pick<UseCallSessionVoiceSettingsResult, 'isLoading' | 'isSaving' | 'issue'>;
+  callState: Pick<
+    UseCallSessionStateResult,
+    'authoritativeStatus' | 'callStateIssue' | 'callStateError'
+  >;
+  starting?: boolean;
+  microphoneStarting?: boolean;
+  startError?: CallIssue | null;
+  endedHere?: boolean;
+}): StartScreenState & { canStart: boolean } {
+  const ended = endedHere || (hasCall && callState.authoritativeStatus === 'ended');
+  if (ended) {
+    return {
+      canStart: false,
+      buttonText: 'Call ended',
+      disabled: true,
+      helperText: ENDED_TEXT,
+      ended,
+    };
+  }
+  if (insecurePage) {
+    return {
+      canStart: false,
+      buttonText: 'Secure setup required',
+      disabled: true,
+      helperText: INSECURE_PAGE_TEXT,
+      ended,
+    };
+  }
+  const linkExpired =
+    startError?.kind === 'auth_expired' ||
+    (hasCall && callState.callStateIssue?.kind === 'auth_expired');
+  if (linkExpired) {
+    return {
+      canStart: false,
+      buttonText: 'Call link expired',
+      disabled: true,
+      issue: startError ?? callState.callStateIssue,
+      ended,
+    };
+  }
+  // A signed call must pass Core's existing state check before the SDK or microphone starts.
+  if (hasCall && callState.authoritativeStatus === null) {
+    return {
+      canStart: false,
+      buttonText: 'Checking call...',
+      disabled: true,
+      helperText: callState.callStateError ?? 'Checking this call with Viventium...',
+      issue: callState.callStateIssue,
+      ended,
+    };
+  }
+  const canStart = (hasCall || hasAgent) && !settings.isSaving;
+  return {
+    canStart,
+    buttonText: microphoneStarting
+      ? 'Turning on mic...'
+      : starting
+        ? 'Starting call...'
+        : canStart
+          ? VIVENTIUM_CONFIG.startButtonText
+          : 'Open from Viventium',
+    disabled: !canStart || starting,
+    helperText:
+      callState.callStateError ??
+      (microphoneStarting
+        ? 'Turning on your microphone...'
+        : starting
+          ? 'Connecting Viventium to the room...'
+          : hasCall && settings.isLoading
+            ? 'Preparing your configured voice route...'
+            : undefined),
+    issue: startError ?? callState.callStateIssue ?? (hasCall ? settings.issue : null),
+    ended,
+  };
 }
 
-function parseCallSessionIdFromTokenOptions(options?: AgentTokenOptions): string | null {
-  for (const candidate of [options?.agentMetadata, options?.participantMetadata]) {
-    if (typeof candidate !== 'string' || !candidate.trim()) continue;
-    try {
-      const parsed = JSON.parse(candidate) as { callSessionId?: unknown };
-      if (
-        typeof parsed.callSessionId === 'string' &&
-        SAFE_CALL_SESSION_ID.test(parsed.callSessionId)
-      ) {
-        return parsed.callSessionId;
-      }
-    } catch {
-      // Structured metadata only; malformed values carry no call authority.
-    }
-  }
+function AppSetup({ onSessionFailure }: { onSessionFailure: () => void }) {
+  useDebugMode({ enabled: IN_DEVELOPMENT });
+  useAgentErrors(onSessionFailure);
   return null;
 }
 
-export function markCallSessionEndingForTokenSource(callSessionId: string): boolean {
-  const normalized = callSessionId.trim();
-  if (!SAFE_CALL_SESSION_ID.test(normalized)) {
-    return false;
-  }
-  const now = Date.now();
-  for (const [candidate, expiresAt] of locallyEndingCallSessions) {
-    if (expiresAt <= now) locallyEndingCallSessions.delete(candidate);
-  }
-  locallyEndingCallSessions.delete(normalized);
-  locallyEndingCallSessions.set(normalized, now + CALL_END_TOKEN_REUSE_MS);
-  while (locallyEndingCallSessions.size > MAX_CANONICAL_CONNECTION_SESSIONS) {
-    const oldest = locallyEndingCallSessions.keys().next();
-    if (oldest.done) break;
-    locallyEndingCallSessions.delete(oldest.value);
-  }
-  return true;
+function AppToaster() {
+  return (
+    <Toaster
+      icons={{ warning: <WarningIcon weight="bold" /> }}
+      position="top-center"
+      className="toaster group"
+      style={
+        {
+          '--normal-bg': 'var(--popover)',
+          '--normal-text': 'var(--popover-foreground)',
+          '--normal-border': 'var(--border)',
+        } as React.CSSProperties
+      }
+    />
+  );
 }
 
-export async function disconnectDurablyEndedCallSession(
-  callSessionId: string | null | undefined,
-  disconnect: () => Promise<void>
-): Promise<void> {
-  if (callSessionId) {
-    markCallSessionEndingForTokenSource(callSessionId);
-  }
-  try {
-    await disconnect();
-  } catch {
-    console.warn('[Viventium] Failed to disconnect a durably ended call.');
-  }
-}
+type CallPageState = {
+  link: CallDeepLink;
+  /** Opened over plain http on another machine: the browser will not give a microphone. */
+  insecurePage: boolean;
+};
 
-function callSessionIsEndingForTokenSource(callSessionId: string | null): boolean {
-  if (!callSessionId) return false;
-  const expiresAt = locallyEndingCallSessions.get(callSessionId);
-  if (!expiresAt) return false;
-  if (expiresAt <= Date.now()) {
-    locallyEndingCallSessions.delete(callSessionId);
-    return false;
-  }
-  return true;
-}
-
-async function wait(ms: number): Promise<void> {
-  await new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
-function stableCacheStringify(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => stableCacheStringify(item)).join(',')}]`;
-  }
-  if (value && typeof value === 'object') {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .filter(([, entryValue]) => entryValue !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right));
-    return `{${entries
-      .map(([key, entryValue]) => `${JSON.stringify(key)}:${stableCacheStringify(entryValue)}`)
-      .join(',')}}`;
-  }
-  return JSON.stringify(value) ?? 'undefined';
-}
-
-export function getConnectionDetailsTokenSource(
-  fallbackOptions?: AgentTokenOptions
-): TokenSourceFixed {
-  return TokenSource.literal(async (options?: AgentTokenOptions): Promise<ConnectionDetails> => {
-    const mergedOptions = {
-      ...(fallbackOptions ?? {}),
-      ...(options ?? {}),
-    };
-    const cacheKey = stableCacheStringify(mergedOptions);
-    const cached = connectionDetailsCache.get(cacheKey);
-    const callSessionId = parseCallSessionIdFromTokenOptions(mergedOptions);
-    if (cached) {
-      if (cached.promise) {
-        return cached.promise;
-      }
-      if (cached.value && callSessionIsEndingForTokenSource(callSessionId)) {
-        return cached.value;
-      }
-      // The installed SDK fetches again on end and unexpected disconnect. Canonical call
-      // credentials represent a prepared dispatch: only an explicit Start may refresh it.
-      if (cached.value && callSessionId) {
-        return cached.value;
-      }
-      if (cached.value && Date.now() - cached.createdAt < CONNECTION_DETAILS_CACHE_MS) {
-        return cached.value;
-      }
-    }
-
-    const connectionDetailsPromise = (async () => {
-      let response: Response;
-      for (let attempt = 0; ; attempt += 1) {
-        try {
-          response = await fetch('/api/connection-details', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              ...callBrowserCapabilityHeaders(
-                parseCallSessionIdFromTokenOptions(mergedOptions) ?? ''
-              ),
-            },
-            body: JSON.stringify(mergedOptions),
-            cache: 'no-store',
-          });
-          break;
-        } catch (error) {
-          const shouldRetry =
-            error instanceof TypeError && attempt + 1 < CONNECTION_DETAILS_MAX_ATTEMPTS;
-          if (!shouldRetry) {
-            throw new CallRequestError({
-              kind: 'gateway_down',
-              message: 'Viventium could not reach the voice runtime.',
-            });
-          }
-          await wait(CONNECTION_DETAILS_RETRY_MS);
-        }
-      }
-
-      let payload: unknown = null;
-      const text = await response.text();
-      if (text) {
-        try {
-          payload = JSON.parse(text);
-        } catch {
-          payload = null;
-        }
-      }
-
-      if (!response.ok) {
-        const retryable = Boolean(
-          payload &&
-            typeof payload === 'object' &&
-            'retryable' in payload &&
-            payload.retryable === true
-        );
-        throw new CallRequestError(callIssueFromResponse(response.status, payload), retryable);
-      }
-
-      return validateConnectionDetails(payload, mergedOptions);
-    })();
-
-    connectionDetailsCache.set(cacheKey, {
-      promise: connectionDetailsPromise,
-      createdAt: Date.now(),
-    });
-    try {
-      const connectionDetails = await connectionDetailsPromise;
-      connectionDetailsCache.set(cacheKey, {
-        value: connectionDetails,
-        createdAt: Date.now(),
-      });
-      return connectionDetails;
-    } catch (error) {
-      if (connectionDetailsCache.get(cacheKey)?.promise === connectionDetailsPromise) {
-        connectionDetailsCache.delete(cacheKey);
-      }
-      throw error;
-    } finally {
-      const latest = connectionDetailsCache.get(cacheKey);
-      if (latest?.promise === connectionDetailsPromise) {
-        connectionDetailsCache.delete(cacheKey);
-      }
-    }
-  });
-}
-
-export async function fetchCallConnectionDetailsForStart(
-  tokenSource: TokenSourceConfigurable | TokenSourceFixed,
-  options: AgentTokenOptions,
-  retry: boolean
-): Promise<unknown> {
-  const key = stableCacheStringify(options);
-  const cached = connectionDetailsCache.get(key);
-  if (cached?.value && (retry || Date.now() - cached.createdAt >= CONNECTION_DETAILS_CACHE_MS)) {
-    connectionDetailsCache.delete(key);
-  }
-  return tokenSource.fetch(options);
-}
-
-async function requestDispatchReclaim(options: AgentTokenOptions): Promise<void> {
-  const response = await fetch('/api/connection-details', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...callBrowserCapabilityHeaders(parseCallSessionIdFromTokenOptions(options) ?? ''),
-    },
-    body: JSON.stringify({
-      ...options,
-      reclaimDispatch: true,
-    }),
-    cache: 'no-store',
-  });
-  if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    throw new Error(text || `Dispatch reclaim failed (${response.status}).`);
-  }
-}
-
-type AppSessionProps = {
-  tokenSource: TokenSourceConfigurable | TokenSourceFixed;
-  tokenOptions: AgentTokenOptions | undefined;
-  autoConnect: boolean;
-  expectedRoomName: string | null;
-  expectedCallSessionId: string | null;
-  expectedConversationId: string | null;
-  canStartCall: boolean;
-  startHint?: string;
-  startButtonText?: string;
-  preflightIssue?: CallIssue | null;
-  appConfig: AppConfig;
-  // VIVENTIUM START: Preserve the same per-call settings object after auto-connect.
+interface CallSessionProps {
+  tokens: CallTokenSource;
+  link: CallDeepLink;
+  hasAgent: boolean;
+  isVideoInputSupported: boolean;
   voiceSettings: UseCallSessionVoiceSettingsResult;
   deviceSound: DeviceSoundSettings;
   callSessionState: UseCallSessionStateResult;
-  onKeepAliveEnabledChange: (enabled: boolean) => void;
-  // VIVENTIUM END
-};
+  callContext: CallContextValue;
+  onKeepAliveChange: (enabled: boolean) => void;
+}
 
-function AppSession({
-  tokenSource,
-  tokenOptions,
-  autoConnect,
-  expectedRoomName,
-  expectedCallSessionId,
-  expectedConversationId,
-  canStartCall,
-  startHint,
-  startButtonText,
-  preflightIssue,
-  appConfig,
-  // VIVENTIUM START: Render the exact preflight settings inside SessionProvider.
+/** The part of the page that owns the LiveKit session. Mounted once a start is asked for. */
+function CallSession({
+  tokens,
+  link,
+  hasAgent,
+  isVideoInputSupported,
   voiceSettings,
   deviceSound,
   callSessionState,
-  onKeepAliveEnabledChange,
-  // VIVENTIUM END
-}: AppSessionProps) {
-  const [hasAutoStarted, setHasAutoStarted] = useState(false);
-  const [isStartInProgress, setIsStartInProgress] = useState(autoConnect && canStartCall);
-  const [isMicrophoneStartupPending, setIsMicrophoneStartupPending] = useState(false);
-  const [audioRecoveryRequired, setAudioRecoveryRequired] = useState(false);
-  const [startError, setStartError] = useState<CallIssue | null>(null);
-  const [hasEnded, setHasEnded] = useState(false);
-  const activeSoundModeRef = useRef<DeviceSoundMode | null>(null);
-  const [activeSoundMode, setActiveSoundMode] = useState<DeviceSoundMode | null>(null);
-  const startPromiseRef = useRef<Promise<boolean> | null>(null);
-  const startAttemptRef = useRef<AbortController | null>(null);
-  const microphoneAttemptRef = useRef<AbortController | null>(null);
-  const terminalDisconnectRef = useRef(false);
-  const startupMountedRef = useRef(false);
-  const dispatchReclaimAttemptsRef = useRef(0);
-  const publishedModeStateRef = useRef<{ callSessionId: string; revision: number } | null>(null);
-  useEffect(() => {
-    if (!isStartInProgress || startPromiseRef.current) {
-      return;
-    }
-    const timeoutId = window.setTimeout(() => {
-      if (!startPromiseRef.current) {
-        setIsStartInProgress(false);
-      }
-    }, START_LATCH_WATCHDOG_MS);
-    return () => window.clearTimeout(timeoutId);
-  }, [isStartInProgress]);
-  const sessionOptions = useMemo(
-    () => ({
-      ...(tokenOptions ?? {}),
-      agentConnectTimeoutMilliseconds: expectedCallSessionId
-        ? VIVENTIUM_CALL_AGENT_CONNECT_TIMEOUT_MS
-        : undefined,
-    }),
-    [expectedCallSessionId, tokenOptions]
+  callContext,
+  onKeepAliveChange,
+}: CallSessionProps) {
+  const callSessionId = link.expectedCallSessionId;
+  const [endedHere, setEndedHere] = useState(false);
+  const session = useSession(
+    tokens.tokenSource,
+    callSessionId ? { agentConnectTimeoutMilliseconds: CALL_AGENT_CONNECT_TIMEOUT_MS } : undefined
   );
-  const session = useSession(tokenSource, sessionOptions);
-  const terminateStartup = useCallback(() => {
-    activeSoundModeRef.current = null;
-    setActiveSoundMode(null);
-    terminalDisconnectRef.current = true;
-    startAttemptRef.current?.abort(
-      new CallRequestError(
-        {
-          kind: 'gateway_down',
-          message: 'The call disconnected before the microphone was ready. Please try again.',
-        },
-        true
-      )
+  const endedOnServer = callSessionState.authoritativeStatus === 'ended';
+  const preflight = deriveStartScreen({
+    hasCall: Boolean(callSessionId),
+    hasAgent,
+    insecurePage: false,
+    settings: voiceSettings,
+    callState: callSessionState,
+    endedHere,
+  });
+  const { startCall, abortStart, isStarting, isMicrophoneStarting, startError, activeSoundMode } =
+    useCallStart({
+      session,
+      tokens,
+      callSessionId,
+      soundMode: deviceSound.mode,
+      ended: endedHere || endedOnServer,
+      authorityIssue: callSessionState.callStateIssue,
+      autoStart: preflight.canStart,
+    });
+  const start = deriveStartScreen({
+    hasCall: Boolean(callSessionId),
+    hasAgent,
+    insecurePage: false,
+    settings: voiceSettings,
+    callState: callSessionState,
+    starting: isStarting,
+    microphoneStarting: isMicrophoneStarting,
+    startError,
+    endedHere,
+  });
+
+  // The server's call record is kept alive only while the call is connecting or connected.
+  const isConnecting = session.connectionState === ConnectionState.Connecting;
+  useEffect(() => {
+    onKeepAliveChange(
+      Boolean(callSessionId) && !endedHere && (session.isConnected || isConnecting)
     );
-  }, []);
-  useEffect(() => {
-    startupMountedRef.current = true;
-    session.room.on(RoomEvent.Disconnected, terminateStartup);
-    return () => {
-      startupMountedRef.current = false;
-      session.room.off(RoomEvent.Disconnected, terminateStartup);
-      // Strict Mode replays cleanup/setup while keeping this call mounted. Only a real
-      // unmount cancels browser capture; terminal RoomEvent.Disconnected remains immediate.
-      queueMicrotask(() => {
-        if (!startupMountedRef.current) terminateStartup();
-      });
-    };
-  }, [session.room, terminateStartup]);
-  useEffect(() => {
-    onKeepAliveEnabledChange(
-      Boolean(expectedCallSessionId) &&
-        !hasEnded &&
-        (session.isConnected || session.connectionState === ConnectionState.Connecting)
-    );
-    return () => onKeepAliveEnabledChange(false);
-  }, [
-    expectedCallSessionId,
-    hasEnded,
-    session.isConnected,
-    session.connectionState,
-    onKeepAliveEnabledChange,
-  ]);
+    return () => onKeepAliveChange(false);
+  }, [callSessionId, endedHere, session.isConnected, isConnecting, onKeepAliveChange]);
 
+  // The call ended somewhere else (the server says so): stop starting, leave the room.
+  const { end, connectionState } = session;
   useEffect(() => {
-    if (callSessionState.authoritativeStatus !== 'ended' || hasEnded) {
-      return;
+    if (!endedOnServer || endedHere) return;
+    setEndedHere(true);
+    abortStart();
+    if (connectionState !== ConnectionState.Disconnected) {
+      tokens.markEnding();
+      end().catch(() => console.warn('[Viventium] Failed to disconnect an ended call.'));
     }
-    setHasEnded(true);
-    terminateStartup();
-    if (session.connectionState !== ConnectionState.Disconnected) {
-      void disconnectDurablyEndedCallSession(expectedCallSessionId, () => session.end());
-    }
-  }, [
-    callSessionState.authoritativeStatus,
-    expectedCallSessionId,
-    hasEnded,
-    session,
-    terminateStartup,
-  ]);
+  }, [abortStart, connectionState, end, endedHere, endedOnServer, tokens]);
 
-  useEffect(() => {
-    const transition = callSessionState.lastModeTransition;
-    if (
-      !transition ||
-      !expectedCallSessionId ||
-      transition.callSessionId !== expectedCallSessionId ||
-      !session.isConnected
-    ) {
-      return;
-    }
-    const published = publishedModeStateRef.current;
-    if (
-      published?.callSessionId === transition.callSessionId &&
-      published.revision >= transition.revision
-    ) {
-      return;
-    }
-    let cancelled = false;
-    let retryTimer: number | null = null;
-    const publish = (attempt: number) => {
-      void publishVoiceCallState(session.room.localParticipant, transition)
-        .then(() => {
-          if (!cancelled) {
-            publishedModeStateRef.current = {
-              callSessionId: transition.callSessionId,
-              revision: transition.revision,
-            };
-          }
-        })
-        .catch((error) => {
-          if (cancelled) return;
-          if (attempt < 2) {
-            retryTimer = window.setTimeout(() => publish(attempt + 1), 250 * (attempt + 1));
-          } else {
-            console.warn('[Viventium] Authoritative call mode delivery failed:', error);
-          }
-        });
-    };
-    publish(0);
-    return () => {
-      cancelled = true;
-      if (retryTimer !== null) window.clearTimeout(retryTimer);
-    };
-  }, [
-    callSessionState.lastModeTransition,
-    expectedCallSessionId,
-    session.isConnected,
-    session.room,
-  ]);
-
-  /* === VIVENTIUM START ===
-   * Feature: Prevent screen sleep during active voice calls.
-   * Purpose: Mobile browsers suspend WebRTC connections when the screen sleeps,
-   * causing call disconnection. The Wake Lock API keeps the screen awake.
-   * === VIVENTIUM END === */
+  useCallStatePublish(session, callSessionId, callSessionState.lastModeTransition);
   useWakeLock(session.isConnected);
-
-  /* === VIVENTIUM START ===
-   * Feature: Cold-start dispatch self-healing.
-   * Purpose: LiveKit can accept an explicit dispatch before the voice worker is registered, then
-   * leave the room without an agent after the user publishes audio. If a call-session room is
-   * connected but still has no agent participant, reclaim and recreate the explicit dispatch.
-   * === VIVENTIUM END === */
-  useEffect(() => {
-    if (
-      !expectedCallSessionId ||
-      !session.isConnected ||
-      isMicrophoneStartupPending ||
-      !tokenOptions?.roomName ||
-      !tokenOptions.agentName
-    ) {
-      dispatchReclaimAttemptsRef.current = 0;
-      return;
-    }
-
-    let cancelled = false;
-    let intervalId: number | null = null;
-    const hasAgentParticipant = () =>
-      Array.from(session.room.remoteParticipants.values()).some((participant) =>
-        Boolean((participant as { isAgent?: boolean }).isAgent)
-      );
-
-    if (hasAgentParticipant()) {
-      dispatchReclaimAttemptsRef.current = 0;
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      intervalId = window.setInterval(() => {
-        if (cancelled || terminalDisconnectRef.current || hasAgentParticipant()) {
-          if (intervalId !== null) {
-            window.clearInterval(intervalId);
-          }
-          return;
-        }
-        if (dispatchReclaimAttemptsRef.current >= DISPATCH_RECLAIM_MAX_ATTEMPTS) {
-          if (intervalId !== null) {
-            window.clearInterval(intervalId);
-          }
-          return;
-        }
-        dispatchReclaimAttemptsRef.current += 1;
-        requestDispatchReclaim(tokenOptions).catch((error) => {
-          console.warn('[Viventium] Voice dispatch reclaim failed:', error);
-        });
-      }, DISPATCH_RECLAIM_RETRY_MS);
-
-      if (!cancelled && !terminalDisconnectRef.current && !hasAgentParticipant()) {
-        dispatchReclaimAttemptsRef.current += 1;
-        requestDispatchReclaim(tokenOptions).catch((error) => {
-          console.warn('[Viventium] Voice dispatch reclaim failed:', error);
-        });
-      }
-    }, DISPATCH_RECLAIM_AFTER_MS);
-
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timeoutId);
-      if (intervalId !== null) {
-        window.clearInterval(intervalId);
-      }
-    };
-  }, [
-    expectedCallSessionId,
-    isMicrophoneStartupPending,
-    session,
-    session.isConnected,
-    tokenOptions,
-  ]);
-
-  /* === VIVENTIUM START ===
-   * Capture before ICE so browsers can offer a reachable LAN candidate. Publish only after
-   * connection, avoiding LiveKit's pre-connect publication timeout. Permission prompts finish
-   * before dispatch so they do not consume the worker's owner-admission window.
-   * === VIVENTIUM END === */
-  const shouldDeferMicrophoneUntilConnected = Boolean(expectedCallSessionId || appConfig.agentName);
-  const startRoomAudio = useCallback(async () => {
-    try {
-      await session.room.startAudio();
-      setAudioRecoveryRequired(false);
-      return true;
-    } catch {
-      setAudioRecoveryRequired(true);
-      return false;
-    }
-  }, [session.room]);
-  const startSession = useCallback(async () => {
-    if (
-      hasEnded ||
-      callSessionState.authoritativeStatus === 'ended' ||
-      callSessionIsEndingForTokenSource(expectedCallSessionId)
-    ) {
-      throw new CallRequestError({
-        kind: 'auth_expired',
-        message: 'This call has ended. Start a fresh call from Viventium.',
-      });
-    }
-    const retry = Boolean(startAttemptRef.current);
-    const attempt = new AbortController();
-    startAttemptRef.current = attempt;
-    terminalDisconnectRef.current = false;
-    let capturedTracks: LocalTrack[] = [];
-    const stopCapturedTracks = async () => {
-      capturedTracks.forEach((track) => track.stop());
-      capturedTracks = [];
-    };
-    try {
-      // Freeze the choice for this call, including reconnect and mute/unmute. A preference
-      // change never replaces a live microphone or interrupts an assistant reply.
-      const soundMode = activeSoundModeRef.current ?? deviceSound.mode;
-      activeSoundModeRef.current = soundMode;
-      setActiveSoundMode(soundMode);
-      session.room.options.audioCaptureDefaults = deviceSoundCaptureOptions(
-        session.room.options.audioCaptureDefaults ?? {},
-        soundMode
-      );
-      if (!shouldDeferMicrophoneUntilConnected) {
-        await session.start({ signal: attempt.signal });
-        await startRoomAudio();
-        return;
-      }
-
-      const microphoneEnabled = readCallMicrophoneEnabled(expectedCallSessionId) !== false;
-      if (microphoneEnabled) {
-        setIsMicrophoneStartupPending(true);
-        microphoneAttemptRef.current = attempt;
-        await enableCallMicrophone({
-          permissionState: await queryMicrophonePermissionState(),
-          signal: attempt.signal,
-          enable: async () => {
-            capturedTracks = await session.room.localParticipant.createTracks({
-              audio: true,
-              video: false,
-            });
-            verifyDeviceSoundCapture(soundMode, capturedTracks[0]);
-          },
-          disable: stopCapturedTracks,
-          grantedTimeoutMs: MICROPHONE_START_TIMEOUT_MS,
-        });
-      }
-      setIsMicrophoneStartupPending(false);
-      if (expectedCallSessionId) {
-        await fetchCallConnectionDetailsForStart(tokenSource, tokenOptions ?? {}, retry);
-      }
-      await session.start({
-        signal: attempt.signal,
-        tracks: {
-          microphone: {
-            enabled: false,
-          },
-        },
-      });
-
-      if (!microphoneEnabled) {
-        await startRoomAudio();
-        return;
-      }
-
-      try {
-        setIsMicrophoneStartupPending(true);
-        const disableMicrophone = () => {
-          const current = microphoneAttemptRef.current;
-          // A newer retry may own the SDK's single-flight microphone publication.
-          if (current !== attempt && current && !current.signal.aborted) return Promise.resolve();
-          return session.room.localParticipant.setMicrophoneEnabled(false);
-        };
-        await enableCallMicrophone({
-          permissionState: 'granted',
-          signal: attempt.signal,
-          enable: async () => {
-            await stopCapturedTracks();
-            // Keep publication with the SDK's source-wide single-flight owner. Raw publishTrack
-            // can race mute/recovery and leave a second microphone live.
-            const publication = await session.room.localParticipant.setMicrophoneEnabled(true);
-            try {
-              verifyDeviceSoundCapture(soundMode, publication?.track);
-            } catch (error) {
-              await disableMicrophone();
-              throw error;
-            }
-          },
-          disable: disableMicrophone,
-          grantedTimeoutMs: MICROPHONE_START_TIMEOUT_MS,
-        });
-        await startRoomAudio();
-      } catch (error) {
-        await session.end().catch((disconnectError) => {
-          console.warn(
-            '[Viventium] Failed to disconnect after microphone startup error:',
-            disconnectError
-          );
-        });
-        throw error;
-      } finally {
-        setIsMicrophoneStartupPending(false);
-      }
-    } catch (error) {
-      attempt.abort(error);
-      await stopCapturedTracks();
-      if (
-        startAttemptRef.current === attempt &&
-        session.room.state === ConnectionState.Disconnected
-      ) {
-        activeSoundModeRef.current = null;
-        setActiveSoundMode(null);
-      }
-      throw error;
-    } finally {
-      setIsMicrophoneStartupPending(false);
-    }
-  }, [
-    session,
-    shouldDeferMicrophoneUntilConnected,
-    startRoomAudio,
-    expectedCallSessionId,
-    hasEnded,
-    callSessionState.authoritativeStatus,
-    tokenSource,
-    tokenOptions,
-    deviceSound.mode,
-  ]);
-
-  /* === VIVENTIUM START ===
-   * Feature: Auto-reconnect after screen sleep / background return.
-   * Purpose: If the wake lock fails (e.g., user manually locks phone), attempt
-   * to restore the call when the page becomes visible again.
-   * === VIVENTIUM END === */
-  const startCall = useCallback(async () => {
-    if (startPromiseRef.current) {
-      return startPromiseRef.current;
-    }
-    setStartError(null);
-    setIsStartInProgress(true);
-    const startPromise = (async () => {
-      try {
-        await startSession();
-        return true;
-      } catch (error) {
-        const issue = classifyCallIssue(error);
-        console.error('Call start failed:', error);
-        setStartError(issue);
-        return false;
-      } finally {
-        startPromiseRef.current = null;
-        setIsStartInProgress(false);
-      }
-    })();
-    startPromiseRef.current = startPromise;
-    return startPromise;
-  }, [startSession]);
-
   const recoverCall = useCallback(async () => {
     if (!(await startCall())) throw new Error('Viventium call recovery failed.');
   }, [startCall]);
@@ -887,163 +272,54 @@ function AppSession({
     start: recoverCall,
   });
 
-  /* === VIVENTIUM START ===
-   * Feature: LibreChat deep-link auto-connect
-   * Purpose: Only auto-connect once token options include the expected room + callSessionId metadata.
-   */
-  useEffect(() => {
-    if (
-      !autoConnect ||
-      hasAutoStarted ||
-      !canStartCall ||
-      hasEnded ||
-      callSessionState.authoritativeStatus === 'ended'
-    ) {
-      return;
-    }
-    const needsRoomName = Boolean(expectedRoomName);
-    const needsCallSessionId = Boolean(expectedCallSessionId);
-    if (needsRoomName && !tokenOptions?.roomName) {
-      return;
-    }
-    if (needsCallSessionId && !tokenOptions?.agentMetadata) {
-      return;
-    }
-    if (session.isConnected || session.connectionState === ConnectionState.Connecting) {
-      setHasAutoStarted(true);
-      return;
-    }
-    startCall().finally(() => {
-      setHasAutoStarted(true);
-    });
-  }, [
-    autoConnect,
-    canStartCall,
-    callSessionState.authoritativeStatus,
-    expectedCallSessionId,
-    expectedRoomName,
-    hasAutoStarted,
-    hasEnded,
-    session,
-    startCall,
-    tokenOptions,
-  ]);
-  /* === VIVENTIUM END === */
-
-  const startInProgressHint = isMicrophoneStartupPending
-    ? 'Turning on your microphone...'
-    : isStartInProgress
-      ? 'Connecting Viventium to the room...'
-      : null;
-  const effectiveStartHint = hasEnded
-    ? 'Call ended. Any active work is continuing in your linked Viventium chat.'
-    : (callSessionState.callStateError ?? startInProgressHint ?? startHint);
-  const effectiveCanStartCall =
-    canStartCall &&
-    !isStartInProgress &&
-    !hasEnded &&
-    startError?.kind !== 'auth_expired' &&
-    callSessionState.callStateIssue?.kind !== 'auth_expired';
-  const effectiveStartButtonText = hasEnded
-    ? 'Call ended'
-    : isMicrophoneStartupPending
-      ? 'Turning on mic...'
-      : isStartInProgress
-        ? 'Starting call...'
-        : startButtonText;
+  const onCallEnding = useCallback(() => tokens.markEnding(), [tokens]);
+  const onCallEnded = useCallback(() => setEndedHere(true), []);
+  const onStart = useCallback(() => void startCall(), [startCall]);
 
   return (
-    <SessionProvider session={session}>
-      <AppSetup onSessionFailure={terminateStartup} />
-      <main className="grid min-h-svh grid-cols-1 place-content-center">
-        <ViewController
-          appConfig={appConfig}
-          canStartCall={effectiveCanStartCall}
-          startupPending={isStartInProgress}
-          startHint={effectiveStartHint ?? undefined}
-          startButtonText={effectiveStartButtonText}
-          onStartCall={() => {
-            void startCall();
-          }}
-          callSessionId={expectedCallSessionId}
-          conversationId={expectedConversationId}
-          mode={callSessionState.mode}
-          authoritativeStatus={callSessionState.authoritativeStatus}
-          lastKeepalive={callSessionState.lastKeepalive}
-          modePending={callSessionState.modePending}
-          onModeChange={(mode) => void callSessionState.setMode(mode)}
-          callStateError={callSessionState.callStateError}
-          onCallEnded={() => setHasEnded(true)}
-          onCallEnding={() => {
-            if (expectedCallSessionId) {
-              markCallSessionEndingForTokenSource(expectedCallSessionId);
-            }
-          }}
-          callIssue={startError ?? callSessionState.callStateIssue ?? preflightIssue}
-          onRetry={() => void startCall()}
-          audioRecoveryRequired={audioRecoveryRequired}
-          onAudioRecovery={() => void startRoomAudio()}
-          callEnded={hasEnded}
-        />
-      </main>
-      {/* VIVENTIUM START: Normal deep links auto-connect, so keep settings in the live surface. */}
-      {expectedCallSessionId && (
-        <ConnectedAdvancedVoiceSettings
-          appConfig={appConfig}
-          settings={voiceSettings}
-          ended={hasEnded}
-          deviceSound={deviceSound}
-          activeSoundMode={activeSoundMode}
-        />
-      )}
-      {/* VIVENTIUM END */}
-      <VoiceAudioPlaybackEvidence resetKey={expectedCallSessionId ?? ''}>
-        <RoomAudioRenderer />
-      </VoiceAudioPlaybackEvidence>
-      <Toaster />
-    </SessionProvider>
+    <VoiceAudioPlaybackEvidence resetKey={callSessionId ?? ''}>
+      <AgentSessionProvider session={session}>
+        <CallProvider value={callContext}>
+          <AppSetup onSessionFailure={abortStart} />
+          <main className="grid min-h-svh grid-cols-1 place-content-center">
+            <ViewController
+              start={start}
+              startupPending={isStarting}
+              onStartCall={onStart}
+              onRetry={onStart}
+              onCallEnding={onCallEnding}
+              onCallEnded={onCallEnded}
+              isVideoInputSupported={isVideoInputSupported}
+              picker={
+                <CallVoicePicker
+                  settings={callSessionId ? voiceSettings : null}
+                  ended={endedHere || endedOnServer}
+                  deviceSound={deviceSound}
+                  activeSoundMode={activeSoundMode}
+                />
+              }
+            />
+          </main>
+          <AppToaster />
+        </CallProvider>
+      </AgentSessionProvider>
+    </VoiceAudioPlaybackEvidence>
   );
 }
 
-export function App({ appConfig }: AppProps) {
-  const [clientReady, setClientReady] = useState(false);
-  const [deepLinkReady, setDeepLinkReady] = useState(false);
-  const [sessionRequested, setSessionRequested] = useState(false);
-  const [tokenOptions, setTokenOptions] = useState<AgentTokenOptions | undefined>(() => {
-    return appConfig.agentName ? { agentName: appConfig.agentName } : undefined;
-  });
-  const [autoConnect, setAutoConnect] = useState(false);
-  const [expectedRoomName, setExpectedRoomName] = useState<string | null>(null);
-  const [expectedCallSessionId, setExpectedCallSessionId] = useState<string | null>(null);
-  const [expectedConversationId, setExpectedConversationId] = useState<string | null>(null);
-  const [remoteCallBlockedReason, setRemoteCallBlockedReason] = useState<string | null>(null);
-  const fallbackVoiceRoute = useMemo(() => buildFallbackVoiceRoute(appConfig), [appConfig]);
-  const voiceSettings = useCallSessionVoiceSettings(expectedCallSessionId, fallbackVoiceRoute);
-  const deviceSound = useDeviceSoundMode();
-  /* VIVENTIUM START: One canonical call-state owner serves both manual setup and the live call.
-   * State loads beside advisory settings. It never adds a Start wait or native session prewarm.
-   * The live session still enables keepalive only while connecting or connected.
-   * VIVENTIUM END */
-  const [keepAliveEnabled, setKeepAliveEnabled] = useState(false);
-  const callSessionState = useCallSessionState(expectedCallSessionId, keepAliveEnabled);
-  const effectiveTokenOptions = useMemo(() => {
-    if (!expectedCallSessionId) {
-      return tokenOptions;
-    }
+interface AppProps {
+  /** Agent for unsigned development calls; a signed call gets its agent from the server. */
+  agentName?: string;
+  isVideoInputSupported: boolean;
+}
 
-    const metadata = buildCallSessionMetadata(expectedCallSessionId);
-    return {
-      ...(tokenOptions ?? {}),
-      agentMetadata: metadata,
-      participantMetadata: metadata,
-    };
-  }, [expectedCallSessionId, tokenOptions]);
-  const tokenSource = useMemo(() => {
-    return shouldUseSandboxTokenSource(expectedCallSessionId)
-      ? getSandboxTokenSource(appConfig)
-      : getConnectionDetailsTokenSource(effectiveTokenOptions);
-  }, [appConfig, effectiveTokenOptions, expectedCallSessionId]);
+export function App({ agentName, isVideoInputSupported }: AppProps) {
+  const [page, setPage] = useState<CallPageState | null>(null);
+  const [startRequested, setStartRequested] = useState(false);
+  const [keepAlive, setKeepAlive] = useState(false);
 
+  // Before first paint: take the call capability out of the address, then read which call this
+  // page was opened for.
   useLayoutEffect(() => {
     captureCallBrowserCapability({
       search: window.location.search,
@@ -1051,134 +327,117 @@ export function App({ appConfig }: AppProps) {
       pathname: window.location.pathname,
       replaceUrl: (url) => window.history.replaceState(window.history.state, '', url),
     });
-    setClientReady(true);
+    const insecurePage = !window.isSecureContext && !isLoopbackHost(window.location.hostname);
+    setPage({
+      link: insecurePage ? readCallDeepLink('') : readCallDeepLink(window.location.search),
+      insecurePage,
+    });
   }, []);
 
-  useEffect(() => {
-    if (!clientReady) {
-      return;
-    }
-    if (!window.isSecureContext && !isLoopbackHost(window.location.hostname)) {
-      setRemoteCallBlockedReason(
-        'Raw LAN/IP or quick-tunnel links are not a supported browser-call topology for local installs. Use Viventium on this Mac via localhost, or deploy a real public HTTPS/WSS surface for both the playground and LiveKit media path.'
-      );
-      setDeepLinkReady(true);
-      return;
-    }
-    const deepLink = readCallDeepLink(window.location.search);
-    if (deepLink.tokenOptions) {
-      setTokenOptions((prev) => ({ ...(prev ?? {}), ...deepLink.tokenOptions }));
-    }
-    setExpectedRoomName(deepLink.expectedRoomName);
-    setExpectedCallSessionId(deepLink.expectedCallSessionId);
-    setExpectedConversationId(deepLink.expectedConversationId);
-    if (deepLink.autoConnect) {
-      setAutoConnect(true);
-    }
-    setDeepLinkReady(true);
-  }, [clientReady]);
+  const callSessionId = page?.link.expectedCallSessionId ?? null;
+  const conversationId = page?.link.expectedConversationId ?? null;
+  const voiceSettings = useCallSessionVoiceSettings(callSessionId);
+  const deviceSound = useDeviceSoundMode();
+  const callSessionState = useCallSessionState(callSessionId, keepAlive);
 
-  if (!clientReady || !deepLinkReady || !deviceSound.ready) {
+  const linkTokenOptions = page?.link.tokenOptions;
+  const tokens = useMemo(
+    () =>
+      createCallTokenSource(VIVENTIUM_CONFIG.tokenEndpoint, {
+        ...(agentName ? { agentName } : {}),
+        ...linkTokenOptions,
+      }),
+    [agentName, linkTokenOptions]
+  );
+
+  const { mode, modePending, setMode, authoritativeStatus, callStateError, lastKeepalive } =
+    callSessionState;
+  const callContext = useMemo<CallContextValue>(
+    () => ({
+      callSessionId,
+      conversationId,
+      mode,
+      modePending,
+      setMode: (next) => void setMode(next),
+      authoritativeStatus,
+      callStateError,
+      lastKeepalive,
+    }),
+    [
+      callSessionId,
+      conversationId,
+      mode,
+      modePending,
+      setMode,
+      authoritativeStatus,
+      callStateError,
+      lastKeepalive,
+    ]
+  );
+
+  const start = deriveStartScreen({
+    hasCall: Boolean(callSessionId),
+    hasAgent: Boolean(agentName),
+    insecurePage: page?.insecurePage ?? false,
+    settings: voiceSettings,
+    callState: callSessionState,
+  });
+  useEffect(() => {
+    if (page?.link.autoConnect && deviceSound.ready && start.canStart) setStartRequested(true);
+  }, [page?.link.autoConnect, deviceSound.ready, start.canStart]);
+
+  if (!page || !deviceSound.ready) {
     return null;
   }
 
-  const voiceSettingsStillLoading = Boolean(expectedCallSessionId) && voiceSettings.isLoading;
-  const hasAuthoritativeRoute = Boolean(
-    !expectedCallSessionId ||
-      (voiceSettings.configuredVoiceRoute.stt.provider &&
-        voiceSettings.configuredVoiceRoute.tts.provider)
-  );
-  const callEnded =
-    Boolean(expectedCallSessionId) && callSessionState.authoritativeStatus === 'ended';
-  const callAuthExpired =
-    Boolean(expectedCallSessionId) && callSessionState.callStateIssue?.kind === 'auth_expired';
-  const canStartCall =
-    Boolean(expectedCallSessionId || appConfig.agentName) &&
-    !remoteCallBlockedReason &&
-    !voiceSettings.isSaving &&
-    !callEnded &&
-    !callAuthExpired;
-  let startHint: string | undefined;
-  let startButtonText: string | undefined;
-  let preflightIssue: CallIssue | null = null;
-  if (remoteCallBlockedReason) {
-    startHint = remoteCallBlockedReason;
-    startButtonText = 'Secure setup required';
-  } else if (voiceSettingsStillLoading) {
-    startHint = 'Preparing your configured voice route...';
-  } else if (voiceSettings.error) {
-    startHint = voiceSettings.error;
-    preflightIssue = voiceSettings.issue;
-  } else if (!hasAuthoritativeRoute) {
-    startHint = 'Voice is not configured. Viventium did not switch providers automatically.';
-    preflightIssue = { kind: 'no_route', message: startHint };
-  }
-
-  if (!sessionRequested && !autoConnect) {
+  if (startRequested) {
     return (
-      <>
-        <main className="grid min-h-svh grid-cols-1 place-content-center">
-          <LinkedChatLink
-            callSessionId={expectedCallSessionId}
-            conversationId={expectedConversationId}
-          />
-          <WelcomeView
-            startButtonText={
-              callEnded
-                ? 'Call ended'
-                : (startButtonText ??
-                  (canStartCall ? appConfig.startButtonText : 'Open from Viventium'))
-            }
-            onStartCall={() => {
-              setSessionRequested(true);
-            }}
-            startDisabled={!canStartCall}
-            helperText={
-              callEnded
-                ? 'Call ended. Any active work is continuing in your linked Viventium chat.'
-                : callSessionState.callStateIssue || preflightIssue
-                  ? undefined
-                  : startHint
-            }
-            callIssue={callSessionState.callStateIssue ?? preflightIssue}
-            callEnded={callEnded}
-            mode={callSessionState.mode}
-          />
-          {/* VIVENTIUM START: Allow route selection before a manually started call. */}
-          <AdvancedVoiceSettings
-            settings={voiceSettings}
-            readOnly={callEnded || !expectedCallSessionId}
-            hasCall={Boolean(expectedCallSessionId)}
-            deviceSound={deviceSound}
-          />
-          {/* VIVENTIUM END */}
-        </main>
-        <Toaster />
-      </>
+      <MotionConfig reducedMotion="user">
+        <CallSession
+          tokens={tokens}
+          link={page.link}
+          hasAgent={Boolean(agentName)}
+          isVideoInputSupported={isVideoInputSupported}
+          voiceSettings={voiceSettings}
+          deviceSound={deviceSound}
+          callSessionState={callSessionState}
+          callContext={callContext}
+          onKeepAliveChange={setKeepAlive}
+        />
+      </MotionConfig>
     );
   }
 
+  // Manual start: the call is prepared on the server only when Start is pressed.
   return (
-    <>
-      {/* VIVENTIUM START: Carry preflight route settings into the connected call. */}
-      <AppSession
-        tokenSource={tokenSource}
-        tokenOptions={effectiveTokenOptions}
-        autoConnect={autoConnect || sessionRequested}
-        expectedRoomName={expectedRoomName}
-        expectedCallSessionId={expectedCallSessionId}
-        expectedConversationId={expectedConversationId}
-        canStartCall={canStartCall}
-        startHint={startHint}
-        startButtonText={startButtonText}
-        preflightIssue={preflightIssue}
-        appConfig={appConfig}
-        voiceSettings={voiceSettings}
-        deviceSound={deviceSound}
-        callSessionState={callSessionState}
-        onKeepAliveEnabledChange={setKeepAliveEnabled}
-      />
-      {/* VIVENTIUM END */}
-    </>
+    <MotionConfig reducedMotion="user">
+      <main className="grid min-h-svh grid-cols-1 place-content-center">
+        <LinkedChatLink callSessionId={callSessionId} conversationId={conversationId} />
+        <WelcomeView
+          startButtonText={start.buttonText}
+          onStartCall={() => {
+            if (start.canStart) setStartRequested(true);
+          }}
+          startDisabled={start.disabled}
+          onRetry={() => void callSessionState.refreshState()}
+          helperText={start.issue ? undefined : start.helperText}
+          callIssue={
+            start.issue && callSessionState.callStateRetryable
+              ? { ...start.issue, retryable: true }
+              : start.issue
+          }
+          callEnded={start.ended}
+          mode={mode}
+          picker={
+            <VoicePicker
+              settings={callSessionId ? voiceSettings : null}
+              phase={start.ended ? 'ended' : 'before'}
+              deviceSound={deviceSound}
+            />
+          }
+        />
+      </main>
+      <AppToaster />
+    </MotionConfig>
   );
 }

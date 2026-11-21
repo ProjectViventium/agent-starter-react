@@ -1,7 +1,7 @@
 'use client';
 
-import React from 'react';
-import { Button } from '@/components/livekit/button';
+import { CallButton } from '@/components/app/call-button';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import type { CallIssue, CallIssueKind } from '@/lib/call-start';
 
 const ISSUE_COPY: Record<CallIssueKind, { title: string; detail: string }> = {
@@ -35,6 +35,7 @@ const ISSUE_COPY: Record<CallIssueKind, { title: string; detail: string }> = {
   },
 };
 
+/** A problem in plain words with one action when a retry makes sense (CP-CMP-021). */
 export function CallIssueNotice({
   issue,
   onRetry,
@@ -45,18 +46,17 @@ export function CallIssueNotice({
   showRetry?: boolean;
 }) {
   const copy = ISSUE_COPY[issue.kind];
+  const canRetry =
+    (issue.kind === 'mic_denied' || issue.retryable === true || showRetry) && onRetry;
   return (
-    <div
-      role="alert"
-      className="border-destructive/30 bg-destructive/5 rounded-xl border p-3 text-left"
-    >
-      <p className="text-sm font-semibold">{copy.title}</p>
-      <p className="text-muted-foreground mt-1 text-xs leading-5">{copy.detail}</p>
-      {(issue.kind === 'mic_denied' || issue.retryable === true || showRetry) && onRetry ? (
-        <Button type="button" size="sm" variant="outline" className="mt-3" onClick={onRetry}>
+    <Alert className="border-destructive/30 bg-destructive/5 block rounded-xl p-3 text-left">
+      <AlertTitle className="line-clamp-none font-semibold">{copy.title}</AlertTitle>
+      <AlertDescription className="mt-1 text-xs leading-5">{copy.detail}</AlertDescription>
+      {canRetry ? (
+        <CallButton type="button" size="sm" variant="outline" className="mt-3" onClick={onRetry}>
           {issue.kind === 'mic_denied' ? 'Try microphone again' : 'Retry recovery'}
-        </Button>
+        </CallButton>
       ) : null}
-    </div>
+    </Alert>
   );
 }

@@ -1,13 +1,15 @@
-/* VIVENTIUM START
- * Purpose: Keep the raw per-call browser capability out of query strings, request bodies,
- * persistent storage, logs, React state, and referrers while preserving zero-step reconnects.
- * VIVENTIUM END */
+/*
+ * Keeps the raw per-call browser capability out of query strings, request bodies, persistent
+ * storage, logs, React state and referrers while preserving zero-step reconnects.
+ * Shared by browser and server code: no browser-only imports here.
+ */
+import { CALL_IDENTIFIER_PATTERN } from '@/lib/call-proxy';
 
 export const CALL_CAPABILITY_FRAGMENT_KEY = 'viventiumCallCapability';
 export const CALL_CAPABILITY_HEADER = 'X-VIVENTIUM-CALL-CAPABILITY';
 const CALL_CAPABILITY_STORAGE_PREFIX = 'viventium.call.capability.v1:';
 const CALL_OPENER_ORIGIN_STORAGE_PREFIX = 'viventium.call.opener-origin.v1:';
-const SAFE_CALL_ID = /^[A-Za-z0-9._:-]{1,160}$/;
+const SAFE_CALL_ID = CALL_IDENTIFIER_PATTERN;
 const SAFE_CAPABILITY = /^[A-Za-z0-9_-]{43}$/;
 
 function browserSessionStorage(): Storage | null {

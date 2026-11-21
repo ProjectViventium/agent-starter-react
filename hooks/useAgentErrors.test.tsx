@@ -17,7 +17,13 @@ vi.mock('@livekit/components-react', () => ({
   useAgent: () => state.agent,
   useSessionContext: () => ({ isConnected: state.isConnected, end: state.end }),
 }));
-vi.mock('@/components/livekit/alert-toast', () => ({ toastAlert: state.toast }));
+// The toast lives inline in the hook (upstream layout), so the seam is sonner itself.
+vi.mock('sonner', () => ({ toast: { custom: state.toast, dismiss: vi.fn() } }));
+
+function renderToast(index: number) {
+  const renderAlert = state.toast.mock.calls[index][0] as (id: string) => React.ReactElement;
+  render(renderAlert('toast-id'));
+}
 
 beforeEach(() => {
   vi.stubGlobal('React', React);
@@ -35,9 +41,9 @@ describe('agent failure transition', () => {
     state.agent = { ...state.agent, failureReasons: [...state.agent.failureReasons] };
     rerender();
     expect(state.toast).toHaveBeenCalledTimes(1);
-    expect(state.toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Session ended' }));
     expect(state.end).toHaveBeenCalledTimes(1);
-    render(state.toast.mock.calls[0][0].description);
+    renderToast(0);
+    expect(screen.getByText('Session ended')).toBeInTheDocument();
     expect(screen.getByText('Agent left the room unexpectedly.')).toBeInTheDocument();
   });
 
@@ -101,7 +107,7 @@ describe('agent failure transition', () => {
     expect(state.toast).toHaveBeenCalledTimes(2);
     expect(firstEnd).toHaveBeenCalledTimes(1);
     expect(state.end).toHaveBeenCalledTimes(1);
-    render(state.toast.mock.calls[1][0].description);
+    renderToast(1);
     expect(screen.getByText('Later terminal failure.')).toBeInTheDocument();
     expect(screen.getByText('Provider stopped.')).toBeInTheDocument();
   });

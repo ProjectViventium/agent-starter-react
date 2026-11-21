@@ -5,6 +5,10 @@ function trimEnv(value: string | undefined): string {
   return value?.trim() ?? '';
 }
 
+/**
+ * The launcher may give each dev server its own build output folder, so several servers can run
+ * from one checkout without sharing `.next`. Absolute paths and `..` are refused.
+ */
 function resolvePlaygroundDistDir(): string | undefined {
   const configured = trimEnv(process.env.VIVENTIUM_PLAYGROUND_NEXT_DIST_DIR);
   if (!configured) {
@@ -19,6 +23,7 @@ function resolvePlaygroundDistDir(): string | undefined {
   return normalized;
 }
 
+/** Public and LAN hostnames that may load dev-server resources (phones, tunnels). */
 function resolveAllowedDevOrigins(): string[] {
   const values = [
     process.env.VIVENTIUM_PUBLIC_CLIENT_URL,
@@ -56,11 +61,10 @@ const compiledBuildRef = /^[0-9a-f]{40}$/.test(requestedBuildRef)
   : 'unversioned';
 
 const nextConfig: NextConfig = {
+  // Pin the project root to this folder for file tracing and Turbopack.
   outputFileTracingRoot: path.resolve(__dirname),
-  /* VIVENTIUM START
-   * Purpose: Bind the advertised playground source identity into the compiled Next artifact.
-   * A runtime environment override must not let an older build impersonate a newer component.
-   * VIVENTIUM END */
+  // The build identity reported by GET /api/health is fixed at build time, so a runtime
+  // environment override cannot make an older build pass for a newer one.
   env: {
     VIVENTIUM_PLAYGROUND_COMPILED_REF: compiledBuildRef,
   },

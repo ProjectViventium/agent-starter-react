@@ -1,23 +1,18 @@
-import type { CallIssueKind } from '@/lib/call-start';
+import { type CallIssueKind, callIssueFromResponse } from '@/lib/call-start';
 
-const PUBLIC_ERROR_CODES = new Set<CallIssueKind>([
-  'auth_expired',
-  'mic_denied',
-  'microphone_missing',
-  'no_route',
-  'gateway_down',
-  'provider_failure',
-  'unknown',
-]);
+/**
+ * The one definition of a call-scoped identifier (call session, task, turn, segment and
+ * presentation ids). The pre-hydration bootstrap script (`lib/call-capability-bootstrap.ts`)
+ * carries its own copy because it cannot import; keep the two in step.
+ */
+export const CALL_IDENTIFIER_PATTERN = /^(?![.]{1,2}$)[A-Za-z0-9._:-]{1,160}$/;
 
 export function parseCallIdentifier(value: unknown): string | null {
   if (typeof value !== 'string') {
     return null;
   }
   const normalized = value.trim();
-  return normalized.length > 0 && normalized.length <= 160 && /^[A-Za-z0-9._:-]+$/.test(normalized)
-    ? normalized
-    : null;
+  return CALL_IDENTIFIER_PATTERN.test(normalized) ? normalized : null;
 }
 
 export function parseTaskInput(value: unknown): string | null {
@@ -28,25 +23,11 @@ export function parseTaskInput(value: unknown): string | null {
   return normalized.length > 0 && normalized.length <= 8_000 ? normalized : null;
 }
 
+/** BFF error body `{ code, message, retryable }`; same mapping as `callIssueFromResponse`. */
 export function normalizeProxyFailure(
   status: number,
   payload: unknown
 ): { code: CallIssueKind; message: string; retryable: boolean } {
-  const value =
-    payload && typeof payload === 'object' && !Array.isArray(payload)
-      ? (payload as Record<string, unknown>)
-      : {};
-  const code =
-    typeof value.code === 'string' && PUBLIC_ERROR_CODES.has(value.code as CallIssueKind)
-      ? (value.code as CallIssueKind)
-      : status === 401 || status === 410
-        ? 'auth_expired'
-        : status >= 500
-          ? 'gateway_down'
-          : 'unknown';
-  const message =
-    typeof value.message === 'string' && value.message.trim()
-      ? value.message.trim().slice(0, 2_000)
-      : 'The call request failed.';
-  return { code, message, retryable: value.retryable === true };
+  const issue = callIssueFromResponse(status, Array.isArray(payload) ? null : payload);
+  return { code: issue.kind, message: issue.message, retryable: issue.retryable === true };
 }

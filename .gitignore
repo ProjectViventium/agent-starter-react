@@ -43,7 +43,7 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# Viventium public-release hardening
+# Viventium public-release hardening: secrets, local state and QA recordings never get tracked.
 .env
 .env.*
 !.env.example

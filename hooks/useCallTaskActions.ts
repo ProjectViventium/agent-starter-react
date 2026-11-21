@@ -2,9 +2,10 @@
 
 import { useCallback, useState } from 'react';
 import { callBrowserCapabilityHeaders } from '@/lib/call-browser-capability';
+import { CALL_IDENTIFIER_PATTERN } from '@/lib/call-proxy';
 import { type VoiceTaskEventV1, parseTaskEvent } from '@/lib/voice-events';
 
-const SAFE_ID = /^[A-Za-z0-9._:-]{1,160}$/;
+const SAFE_ID = CALL_IDENTIFIER_PATTERN;
 const MAX_INPUT_LENGTH = 8_000;
 const TASK_ACTION_TIMEOUT_MS = 5_000;
 
@@ -136,8 +137,6 @@ export function useCallTaskActions(
       setActionError(null);
       setActionRetryable(false);
       setPendingTaskIds((current) => new Set(current).add(taskId));
-      const requestStartedAt = performance.now();
-      console.debug('[ViventiumCallTaskAction]', JSON.stringify({ stage: 'request', action }));
       const controller = new AbortController();
       let timedOut = false;
       const timeoutId = window.setTimeout(() => {
@@ -159,26 +158,7 @@ export function useCallTaskActions(
           cache: 'no-store',
           signal: controller.signal,
         });
-        console.debug(
-          '[ViventiumCallTaskAction]',
-          JSON.stringify({
-            stage: 'response',
-            action,
-            status: response.status,
-            elapsedMs: Math.round(Math.max(0, performance.now() - requestStartedAt)),
-          })
-        );
         const payload = await readTaskActionPayload(response, callSessionId, taskId, action);
-        console.debug(
-          '[ViventiumCallTaskAction]',
-          JSON.stringify({
-            stage: 'validation',
-            action,
-            outcome: payload.terminalOutcome,
-            boundEventCount: payload.events.length,
-            malformedEvent: payload.malformedEvent,
-          })
-        );
         payload.events.forEach((event) => onTaskEvent?.(event));
         if (payload.malformedEvent) {
           setActionError('The task runtime returned invalid task state. Live recovery will retry.');
@@ -198,14 +178,6 @@ export function useCallTaskActions(
         }
         return true;
       } catch (error) {
-        console.debug(
-          '[ViventiumCallTaskAction]',
-          JSON.stringify({
-            stage: 'failure',
-            action,
-            failureClass: timedOut ? 'timeout' : error instanceof TypeError ? 'fetch' : 'unknown',
-          })
-        );
         if (timedOut) {
           setActionError(
             'The task runtime did not respond in time. No action was confirmed; you can retry safely.'

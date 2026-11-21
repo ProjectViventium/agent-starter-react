@@ -180,11 +180,22 @@ function deferred<T>() {
 }
 
 describe('useCallSessionState mode contract', () => {
-  it('prefers the versioned mode and retains legacy fallback', async () => {
+  it('reads the one mode field and ignores legacy booleans (the BFF derives mode)', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({ version: 1, mode: 'wing' }))
-      .mockResolvedValueOnce(jsonResponse({ listenOnlyModeEnabled: true }));
+      .mockResolvedValueOnce(jsonResponse({ mode: 'listen_only', wingModeEnabled: true }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          version: 1,
+          callSessionId: 'call-3',
+          status: 'listening',
+          mode: 'call',
+          revision: 0,
+          updatedAt: '2026-08-09T12:00:00.000Z',
+          listenOnlyModeEnabled: true,
+        })
+      );
     vi.stubGlobal('fetch', fetchMock);
 
     const first = renderHook(() => useCallSessionState('call-1', false));
@@ -193,6 +204,11 @@ describe('useCallSessionState mode contract', () => {
 
     const second = renderHook(() => useCallSessionState('call-2', false));
     await waitFor(() => expect(second.result.current.mode).toBe('listen_only'));
+    second.unmount();
+
+    const third = renderHook(() => useCallSessionState('call-3', false));
+    await waitFor(() => expect(third.result.current.authoritativeStatus).toBe('listening'));
+    expect(third.result.current.mode).toBe('call');
   });
 
   it('switches Call, Wing, and Listen-Only atomically with one request', async () => {
@@ -229,8 +245,6 @@ describe('useCallSessionState mode contract', () => {
       callSessionId: 'call-1',
       touch: true,
       mode: 'listen_only',
-      wingModeEnabled: false,
-      listenOnlyModeEnabled: true,
     });
   });
 
@@ -366,7 +380,6 @@ describe('useCallSessionState mode contract', () => {
     });
 
     expect(result.current.modePending).toBe(true);
-    expect(result.current.listenOnlyModePending).toBe(true);
 
     currentMutation.resolve(
       jsonResponse({
@@ -437,7 +450,6 @@ describe('useCallSessionState mode contract', () => {
     await waitFor(() => expect(result.current.authoritativeStatus).toBe('listening'));
     expect(result.current.mode).toBe('call');
     expect(result.current.modePending).toBe(false);
-    expect(result.current.listenOnlyModePending).toBe(false);
   });
 
   it('carries exact structured failures without guessing from message text', async () => {
@@ -733,5 +745,42 @@ describe('useCallSessionState mode contract', () => {
     });
     expect(reads).toBe(stoppedAt);
     vi.useRealTimers();
+  });
+});
+
+describe('authoritative preflight recovery', () => {
+  it('retries the existing GET and clears an initial failure when Core validates the call', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(
+          { code: 'gateway_down', message: 'Synthetic unavailable.', retryable: true },
+          503
+        )
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          version: 1,
+          callSessionId: 'call-recheck',
+          mode: 'call',
+          status: 'connecting',
+          revision: 1,
+          updatedAt: '2026-08-09T12:00:00.000Z',
+        })
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const { result } = renderHook(() => useCallSessionState('call-recheck', false));
+    await waitFor(() => expect(result.current.callStateIssue?.kind).toBe('gateway_down'));
+    await act(async () => expect(await result.current.refreshState()).toBe(true));
+    expect(result.current.authoritativeStatus).toBe('connecting');
+    expect(result.current.callStateIssue).toBeNull();
+    expect(result.current.callStateError).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(
+      fetchMock.mock.calls.every(
+        ([url, init]) =>
+          url === '/api/call-session-state?callSessionId=call-recheck' && init.method === 'GET'
+      )
+    ).toBe(true);
   });
 });

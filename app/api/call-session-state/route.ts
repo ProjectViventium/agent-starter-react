@@ -1,230 +1,128 @@
-/* VIVENTIUM START
- * Purpose: Viventium agent-starter customization.
- * Feature: Call session state proxy for Wing Mode + keepalive
- *
- * Why:
- * - The modern playground runs on a separate origin from LibreChat.
- * - The browser should not hold the shared call-session secret directly.
- * - This route proxies call-session state reads/writes to LibreChat using the server-side secret.
- * VIVENTIUM END */
+/*
+ * Call state proxy (CP-APP-019): read the call's mode and status, switch mode
+ * (Call / Wing / Listen-Only), keep the call session alive, and mark it ended.
+ * The browser never holds the shared call-session secret; Core is reached through the adapter.
+ */
 import { NextResponse } from 'next/server';
-import {
-  CALL_CAPABILITY_HEADER,
-  readRequestCallBrowserCapability,
-} from '@/lib/call-browser-capability';
+import { corePaths, coreRequest, readCoreText } from '@/app/api/call-tasks/proxy';
+import { readRequestCallBrowserCapability } from '@/lib/call-browser-capability';
 import { normalizeProxyFailure, parseCallIdentifier } from '@/lib/call-proxy';
 
-function buildTargetUrl(callSessionId: string): URL {
-  const origin = process.env.VIVENTIUM_LIBRECHAT_ORIGIN;
-  if (!origin) {
-    throw new Error('VIVENTIUM_LIBRECHAT_ORIGIN is not configured');
-  }
-  return new URL(`/api/viventium/calls/${encodeURIComponent(callSessionId)}/state`, origin);
+const CALL_MODES = new Set(['call', 'wing', 'listen_only']);
+const NO_STORE = { 'Cache-Control': 'no-store' } as const;
+
+function stateRuntimeFailure(message: string, status: 503 | 504) {
+  return NextResponse.json({ code: 'gateway_down', message, retryable: true }, { status });
 }
 
-function getSharedHeaders(browserCapability: string): HeadersInit {
-  const secret = process.env.VIVENTIUM_CALL_SESSION_SECRET;
-  if (!secret) {
-    throw new Error('VIVENTIUM_CALL_SESSION_SECRET is not configured');
+function invalidRequest(message: string) {
+  return NextResponse.json({ code: 'unknown', message, retryable: false }, { status: 400 });
+}
+
+function missingCapability() {
+  return NextResponse.json(
+    {
+      code: 'auth_expired',
+      message: 'The call capability is missing or invalid.',
+      retryable: false,
+    },
+    { status: 401 }
+  );
+}
+
+/**
+ * The page reads one field, `mode`. Core sends it on every state response; if an older session
+ * record answers with only the legacy booleans, `mode` is derived here, in one place.
+ */
+function withMode(payload: unknown): unknown {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return payload;
+  }
+  const state = payload as Record<string, unknown>;
+  if (typeof state.mode === 'string' && CALL_MODES.has(state.mode)) {
+    return state;
+  }
+  const wing =
+    typeof state.wingModeEnabled === 'boolean' ? state.wingModeEnabled : state.shadowModeEnabled;
+  if (typeof state.listenOnlyModeEnabled !== 'boolean' && typeof wing !== 'boolean') {
+    return state;
   }
   return {
-    'Content-Type': 'application/json',
-    'X-VIVENTIUM-CALL-SECRET': secret,
-    [CALL_CAPABILITY_HEADER]: browserCapability,
+    ...state,
+    mode: state.listenOnlyModeEnabled === true ? 'listen_only' : wing === true ? 'wing' : 'call',
   };
 }
 
 async function proxyStateRequest(
-  url: URL,
+  callSessionId: string,
   method: 'GET' | 'POST',
   browserCapability: string,
   body?: Record<string, unknown>
 ) {
-  const configuredTimeout = Number(process.env.VIVENTIUM_CALL_PROXY_TIMEOUT_MS);
-  const timeoutMs =
-    Number.isFinite(configuredTimeout) && configuredTimeout >= 1 && configuredTimeout <= 60_000
-      ? configuredTimeout
-      : 4_500;
-  const controller = new AbortController();
-  let timedOut = false;
-  const timeoutId = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, timeoutMs);
-  let response: Response;
-  let text: string;
-  try {
-    response = await fetch(url.toString(), {
-      method,
-      headers: getSharedHeaders(browserCapability),
-      body: method === 'POST' ? JSON.stringify(body ?? {}) : undefined,
-      cache: 'no-store',
-      signal: controller.signal,
-    });
-    text = await response.text();
-  } catch (error) {
-    if (timedOut) {
-      return NextResponse.json(
-        {
-          code: 'gateway_down',
-          message: 'The call state runtime did not respond before the request timed out.',
-          retryable: true,
-        },
-        { status: 504 }
-      );
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
+  const outcome = await coreRequest({
+    path: corePaths.callState(callSessionId),
+    method,
+    browserCapability,
+    ...(method === 'POST' ? { body: body ?? {} } : {}),
+    readBody: readCoreText((text) => ({ message: text })),
+  });
+  if (outcome.kind === 'timeout') {
+    return stateRuntimeFailure(
+      'The call state runtime did not respond before the request timed out.',
+      504
+    );
   }
-
-  let payload: unknown = null;
-  if (text) {
-    try {
-      payload = JSON.parse(text);
-    } catch {
-      payload = { message: text };
-    }
+  if (outcome.kind !== 'response') {
+    return stateRuntimeFailure('Viventium could not reach the call state runtime.', 503);
   }
-
-  if (payload && typeof payload === 'object') {
-    const normalized = payload as {
-      wingModeEnabled?: unknown;
-      shadowModeEnabled?: unknown;
-      listenOnlyModeEnabled?: unknown;
-      mode?: unknown;
-    };
-    if (
-      typeof normalized.wingModeEnabled !== 'boolean' &&
-      typeof normalized.shadowModeEnabled === 'boolean'
-    ) {
-      normalized.wingModeEnabled = normalized.shadowModeEnabled;
-    }
-    if (
-      typeof normalized.shadowModeEnabled !== 'boolean' &&
-      typeof normalized.wingModeEnabled === 'boolean'
-    ) {
-      normalized.shadowModeEnabled = normalized.wingModeEnabled;
-    }
-    if (normalized.listenOnlyModeEnabled === true) {
-      normalized.wingModeEnabled = false;
-      normalized.shadowModeEnabled = false;
-    }
-  }
-
   return NextResponse.json(
-    response.ok ? (payload ?? {}) : normalizeProxyFailure(response.status, payload),
-    {
-      status: response.status,
-      headers: {
-        'Cache-Control': 'no-store',
-      },
-    }
+    outcome.ok
+      ? (withMode(outcome.payload) ?? {})
+      : normalizeProxyFailure(outcome.status, outcome.payload),
+    { status: outcome.status, headers: NO_STORE }
   );
 }
 
 export async function GET(req: Request) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const callSessionId = parseCallIdentifier(searchParams.get('callSessionId'));
-    if (!callSessionId) {
-      return NextResponse.json(
-        { code: 'unknown', message: 'A valid callSessionId is required.', retryable: false },
-        { status: 400 }
-      );
-    }
-    const browserCapability = readRequestCallBrowserCapability(req);
-    if (!browserCapability) {
-      return NextResponse.json(
-        {
-          code: 'auth_expired',
-          message: 'The call capability is missing or invalid.',
-          retryable: false,
-        },
-        { status: 401 }
-      );
-    }
-    return await proxyStateRequest(buildTargetUrl(callSessionId), 'GET', browserCapability);
-  } catch {
-    return NextResponse.json(
-      {
-        code: 'gateway_down',
-        message: 'Viventium could not reach the call state runtime.',
-        retryable: true,
-      },
-      { status: 503 }
-    );
+  const callSessionId = parseCallIdentifier(new URL(req.url).searchParams.get('callSessionId'));
+  if (!callSessionId) {
+    return invalidRequest('A valid callSessionId is required.');
   }
+  const browserCapability = readRequestCallBrowserCapability(req);
+  if (!browserCapability) {
+    return missingCapability();
+  }
+  return proxyStateRequest(callSessionId, 'GET', browserCapability);
 }
 
 export async function POST(req: Request) {
-  try {
-    const body = (await req.json().catch(() => ({}))) as {
-      callSessionId?: unknown;
-      wingModeEnabled?: unknown;
-      shadowModeEnabled?: unknown;
-      listenOnlyModeEnabled?: unknown;
-      mode?: unknown;
-      touch?: unknown;
-      status?: unknown;
-    };
-    const callSessionId = parseCallIdentifier(body.callSessionId);
-    if (!callSessionId) {
-      return NextResponse.json(
-        { code: 'unknown', message: 'A valid callSessionId is required.', retryable: false },
-        { status: 400 }
-      );
-    }
-    const browserCapability = readRequestCallBrowserCapability(req);
-    if (!browserCapability) {
-      return NextResponse.json(
-        {
-          code: 'auth_expired',
-          message: 'The call capability is missing or invalid.',
-          retryable: false,
-        },
-        { status: 401 }
-      );
-    }
-    if (body.status !== undefined && body.status !== 'ended') {
-      return NextResponse.json(
-        { code: 'unknown', message: 'The call status transition is invalid.', retryable: false },
-        { status: 400 }
-      );
-    }
-
-    const proxyBody: Record<string, unknown> = {
-      touch: body.status === 'ended' ? false : body.touch !== false,
-    };
-    if (body.status === 'ended') {
-      proxyBody.status = 'ended';
-    }
-    if (body.mode === 'call' || body.mode === 'wing' || body.mode === 'listen_only') {
-      proxyBody.mode = body.mode;
-    }
-    if (typeof body.wingModeEnabled === 'boolean') {
-      proxyBody.wingModeEnabled = body.wingModeEnabled;
-    } else if (typeof body.shadowModeEnabled === 'boolean') {
-      proxyBody.shadowModeEnabled = body.shadowModeEnabled;
-    }
-    if (typeof body.listenOnlyModeEnabled === 'boolean') {
-      proxyBody.listenOnlyModeEnabled = body.listenOnlyModeEnabled;
-    }
-
-    return await proxyStateRequest(
-      buildTargetUrl(callSessionId),
-      'POST',
-      browserCapability,
-      proxyBody
-    );
-  } catch {
-    return NextResponse.json(
-      {
-        code: 'gateway_down',
-        message: 'Viventium could not reach the call state runtime.',
-        retryable: true,
-      },
-      { status: 503 }
-    );
+  const body = (await req.json().catch(() => ({}))) as {
+    callSessionId?: unknown;
+    mode?: unknown;
+    touch?: unknown;
+    status?: unknown;
+  } | null;
+  const callSessionId = parseCallIdentifier(body?.callSessionId);
+  if (!body || !callSessionId) {
+    return invalidRequest('A valid callSessionId is required.');
   }
+  const browserCapability = readRequestCallBrowserCapability(req);
+  if (!browserCapability) {
+    return missingCapability();
+  }
+  if (body.status !== undefined && body.status !== 'ended') {
+    return invalidRequest('The call status transition is invalid.');
+  }
+
+  // The only status a browser may set is "ended"; ending never extends the session.
+  const proxyBody: Record<string, unknown> = {
+    touch: body.status === 'ended' ? false : body.touch !== false,
+  };
+  if (body.status === 'ended') {
+    proxyBody.status = 'ended';
+  }
+  if (typeof body.mode === 'string' && CALL_MODES.has(body.mode)) {
+    proxyBody.mode = body.mode;
+  }
+  return proxyStateRequest(callSessionId, 'POST', browserCapability, proxyBody);
 }

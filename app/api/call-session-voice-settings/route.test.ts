@@ -85,14 +85,14 @@ describe('call voice settings label carrier', () => {
 describe('voice settings response body deadline', () => {
   afterEach(() => {
     vi.useRealTimers();
-    delete process.env.VIVENTIUM_VOICE_SETTINGS_PROXY_TIMEOUT_MS;
+    delete process.env.VIVENTIUM_CALL_PROXY_TIMEOUT_MS;
   });
 
   const configure = () => {
     vi.useFakeTimers();
     process.env.VIVENTIUM_LIBRECHAT_ORIGIN = 'https://librechat.example.com';
     process.env.VIVENTIUM_CALL_SESSION_SECRET = 'synthetic-server-secret';
-    process.env.VIVENTIUM_VOICE_SETTINGS_PROXY_TIMEOUT_MS = '10';
+    process.env.VIVENTIUM_CALL_PROXY_TIMEOUT_MS = '10';
   };
   const request = () =>
     new Request(

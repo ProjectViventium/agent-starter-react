@@ -1,15 +1,17 @@
+/*
+ * Wing engagement proxy (CP-APP-022): asks Core whether a finished owner turn in Wing mode was
+ * addressed to Viventium and returns Core's signed verdict unchanged.
+ */
 import { NextResponse } from 'next/server';
-import {
-  CALL_CAPABILITY_HEADER,
-  readRequestCallBrowserCapability,
-} from '@/lib/call-browser-capability';
+import { corePaths, coreRequest, readCoreJson } from '@/app/api/call-tasks/proxy';
+import { readRequestCallBrowserCapability } from '@/lib/call-browser-capability';
 import { normalizeProxyFailure, parseCallIdentifier } from '@/lib/call-proxy';
 
 const REQUEST_FIELDS = new Set(['version', 'callSessionId', 'turnId', 'segmentIds']);
 const MAX_SEGMENT_IDS = 32;
 const NO_STORE_HEADERS = { 'Cache-Control': 'no-store' } as const;
-// Keep model classification inside the browser's 9-second and gateway's 10-second deadlines
-// without changing the shared task proxy's unrelated 4.5-second request budget.
+// The verdict comes from a model: keep it inside the browser's 9-second and the gateway's
+// 10-second deadlines, independent of the shared 4.5-second proxy budget.
 const CALL_ENGAGEMENT_PROXY_TIMEOUT_MS = 8_500;
 
 type CallEngagementRequest = {
@@ -26,104 +28,47 @@ function invalidRequest() {
   );
 }
 
+function engagementRuntimeFailure(message: string, retryable: boolean, status: 503 | 504) {
+  return NextResponse.json(
+    { code: 'gateway_down', message, retryable },
+    { status, headers: NO_STORE_HEADERS }
+  );
+}
+
 async function proxyCallEngagementRequest(
   request: Request,
   browserCapability: string,
   body: CallEngagementRequest
 ) {
-  const origin = process.env.VIVENTIUM_LIBRECHAT_ORIGIN;
-  const secret = process.env.VIVENTIUM_CALL_SESSION_SECRET;
-  if (!origin || !secret) {
-    return NextResponse.json(
-      {
-        code: 'gateway_down',
-        message: 'The voice task runtime is not configured.',
-        retryable: false,
-      },
-      { status: 503, headers: NO_STORE_HEADERS }
+  const outcome = await coreRequest({
+    path: corePaths.engagementClassify(),
+    method: 'POST',
+    browserCapability,
+    sessionHeader: body.callSessionId,
+    body,
+    timeoutMs: CALL_ENGAGEMENT_PROXY_TIMEOUT_MS,
+    // Never forward the server-only call secret through an upstream redirect.
+    redirect: 'error',
+    cancelWith: request.signal,
+    readBody: readCoreJson,
+  });
+  if (outcome.kind === 'unconfigured') {
+    return engagementRuntimeFailure('The voice task runtime is not configured.', false, 503);
+  }
+  if (outcome.kind === 'timeout') {
+    return engagementRuntimeFailure(
+      'The voice task runtime did not respond before the request timed out.',
+      true,
+      504
     );
   }
-
-  let target: URL;
-  try {
-    target = new URL('/api/viventium/voice/engagement/classify', origin);
-  } catch {
-    return NextResponse.json(
-      {
-        code: 'gateway_down',
-        message: 'The voice task runtime is not configured.',
-        retryable: false,
-      },
-      { status: 503, headers: NO_STORE_HEADERS }
-    );
+  if (outcome.kind === 'unreachable') {
+    return engagementRuntimeFailure('Viventium could not reach the voice task runtime.', true, 503);
   }
-  const controller = new AbortController();
-  const abortRequest = () => controller.abort();
-  if (request.signal.aborted) {
-    controller.abort();
-  }
-  request.signal.addEventListener('abort', abortRequest, { once: true });
-  let timedOut = false;
-  const timeoutId = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, CALL_ENGAGEMENT_PROXY_TIMEOUT_MS);
-
-  try {
-    const response = await fetch(target, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-VIVENTIUM-CALL-SECRET': secret,
-        'X-VIVENTIUM-CALL-SESSION': body.callSessionId,
-        [CALL_CAPABILITY_HEADER]: browserCapability,
-      },
-      body: JSON.stringify(body),
-      cache: 'no-store',
-      // Never forward the server-only call secret through an upstream redirect.
-      redirect: 'error',
-      signal: controller.signal,
-    });
-    const payload: unknown = await response.json().catch((error) => {
-      if (controller.signal.aborted) {
-        throw error;
-      }
-      return null;
-    });
-    controller.signal.throwIfAborted();
-    if (!response.ok) {
-      return NextResponse.json(normalizeProxyFailure(response.status, payload), {
-        status: response.status,
-        headers: NO_STORE_HEADERS,
-      });
-    }
-    return NextResponse.json(payload ?? {}, {
-      status: response.status,
-      headers: NO_STORE_HEADERS,
-    });
-  } catch {
-    if (timedOut) {
-      return NextResponse.json(
-        {
-          code: 'gateway_down',
-          message: 'The voice task runtime did not respond before the request timed out.',
-          retryable: true,
-        },
-        { status: 504, headers: NO_STORE_HEADERS }
-      );
-    }
-    return NextResponse.json(
-      {
-        code: 'gateway_down',
-        message: 'Viventium could not reach the voice task runtime.',
-        retryable: true,
-      },
-      { status: 503, headers: NO_STORE_HEADERS }
-    );
-  } finally {
-    clearTimeout(timeoutId);
-    request.signal.removeEventListener('abort', abortRequest);
-  }
+  return NextResponse.json(
+    outcome.ok ? (outcome.payload ?? {}) : normalizeProxyFailure(outcome.status, outcome.payload),
+    { status: outcome.status, headers: NO_STORE_HEADERS }
+  );
 }
 
 export async function POST(request: Request) {

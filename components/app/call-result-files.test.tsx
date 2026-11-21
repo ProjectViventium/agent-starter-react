@@ -51,78 +51,34 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 describe('completed call file result', () => {
-  it('traces structural read stages without capability, URLs, names or owner content', async () => {
+  it('shows the files without writing anything to the console', async () => {
     request.mockResolvedValue({ ok: true, status: 200, json: async () => payload() });
     render(<CallResultFiles callSessionId="call" tasks={[task()]} />);
     await screen.findByText('report.csv');
-    const traces = debug.mock.calls.map(([, trace]) => JSON.parse(String(trace)));
-    expect(traces).toEqual([
-      { stage: 'fetch_started', expectedSequence: 1 },
-      { stage: 'http_response', expectedSequence: 1, httpStatus: 200 },
-      {
-        stage: 'validation',
-        expectedSequence: 1,
-        httpStatus: 200,
-        reason: 'valid',
-        returnedSequence: 1,
-        returnedNameCount: 1,
-      },
-      { stage: 'accepted', expectedSequence: 1, returnedSequence: 1, acceptedCount: 1 },
-    ]);
-    const serialized = JSON.stringify([...debug.mock.calls, ...warn.mock.calls]);
-    for (const privateValue of [
-      'report.csv',
-      'https://',
-      'a'.repeat(43),
-      'callSessionId',
-      'taskId',
-      'resultMessageId',
-    ]) {
-      expect(serialized).not.toContain(privateValue);
-    }
+    expect(debug).not.toHaveBeenCalled();
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it('reports a failed HTTP read without retrying or logging its body', async () => {
+  it('warns once, with the reason only, when the read is refused', async () => {
     request.mockResolvedValue({ ok: false, status: 403 });
     render(<CallResultFiles callSessionId="call" tasks={[task()]} />);
     await waitFor(() =>
-      expect(warn).toHaveBeenCalledWith(
-        '[ViventiumCallFiles]',
-        JSON.stringify({
-          stage: 'validation',
-          expectedSequence: 1,
-          httpStatus: 403,
-          reason: 'http_error',
-        })
-      )
+      expect(warn).toHaveBeenCalledWith('[Viventium] Result files were not shown (http_403).')
     );
     expect(request).toHaveBeenCalledOnce();
     expect(screen.queryByText('report.csv')).not.toBeInTheDocument();
   });
 
-  it('reports the rejected stale revision and never accepts the stale names', async () => {
+  it('never accepts the names of an older revision', async () => {
     request.mockResolvedValue({ ok: true, status: 200, json: async () => payload() });
     render(<CallResultFiles callSessionId="call" tasks={[task({ sequence: 2 })]} />);
     await waitFor(() =>
-      expect(warn).toHaveBeenCalledWith(
-        '[ViventiumCallFiles]',
-        JSON.stringify({
-          stage: 'validation',
-          expectedSequence: 2,
-          httpStatus: 200,
-          reason: 'stale_sequence',
-          returnedSequence: 1,
-          returnedNameCount: 1,
-        })
-      )
+      expect(warn).toHaveBeenCalledWith('[Viventium] Result files were not shown (stale_sequence).')
     );
-    expect(
-      debug.mock.calls.some(([, trace]) => JSON.parse(String(trace)).stage === 'accepted')
-    ).toBe(false);
+    expect(screen.queryByText('report.csv')).not.toBeInTheDocument();
   });
 
-  it('reports missing filename data as a contract failure rather than an empty result', async () => {
+  it('treats missing file names as a broken reply, not as an empty result', async () => {
     request.mockResolvedValue({
       ok: true,
       status: 200,
@@ -131,34 +87,22 @@ describe('completed call file result', () => {
     render(<CallResultFiles callSessionId="call" tasks={[task()]} />);
     await waitFor(() =>
       expect(warn).toHaveBeenCalledWith(
-        '[ViventiumCallFiles]',
-        JSON.stringify({
-          stage: 'validation',
-          expectedSequence: 1,
-          httpStatus: 200,
-          reason: 'missing_filenames',
-          returnedSequence: 1,
-          returnedNameCount: undefined,
-        })
+        '[Viventium] Result files were not shown (missing_filenames).'
       )
     );
     expect(screen.queryByText('report.csv')).not.toBeInTheDocument();
   });
 
-  it('reports a read exception without its private error text', async () => {
+  it('reports a failed read without its private error text, names, addresses or ids', async () => {
     request.mockRejectedValue(new Error('private network text and credential'));
     render(<CallResultFiles callSessionId="call" tasks={[task()]} />);
     await waitFor(() =>
-      expect(warn).toHaveBeenCalledWith(
-        '[ViventiumCallFiles]',
-        JSON.stringify({
-          stage: 'read_failed',
-          expectedSequence: 1,
-          reason: 'read_failed',
-        })
-      )
+      expect(warn).toHaveBeenCalledWith('[Viventium] Result files were not shown (read_failed).')
     );
-    expect(JSON.stringify(warn.mock.calls)).not.toContain('private network text');
+    const written = JSON.stringify(warn.mock.calls);
+    for (const privateValue of ['private network text', 'report.csv', 'https://', 'a'.repeat(43)]) {
+      expect(written).not.toContain(privateValue);
+    }
     expect(request).toHaveBeenCalledOnce();
   });
 
